@@ -10,13 +10,13 @@ import (
 	"log/slog"
 	"runtime"
 
-	"github.com/charmbracelet/crush/internal/app"
-	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/csync"
-	"github.com/charmbracelet/crush/internal/db"
-	"github.com/charmbracelet/crush/internal/proto"
-	"github.com/charmbracelet/crush/internal/ui/util"
-	"github.com/charmbracelet/crush/internal/version"
+	"github.com/abrekhov/crush/internal/app"
+	"github.com/abrekhov/crush/internal/config"
+	"github.com/abrekhov/crush/internal/csync"
+	"github.com/abrekhov/crush/internal/db"
+	"github.com/abrekhov/crush/internal/proto"
+	"github.com/abrekhov/crush/internal/ui/util"
+	"github.com/abrekhov/crush/internal/version"
 	"github.com/google/uuid"
 )
 

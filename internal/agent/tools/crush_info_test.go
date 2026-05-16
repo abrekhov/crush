@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"charm.land/catwalk/pkg/catwalk"
-	"github.com/charmbracelet/crush/internal/agent/tools/mcp"
-	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/csync"
-	"github.com/charmbracelet/crush/internal/lsp"
-	"github.com/charmbracelet/crush/internal/skills"
+	"github.com/abrekhov/crush/internal/agent/tools/mcp"
+	"github.com/abrekhov/crush/internal/config"
+	"github.com/abrekhov/crush/internal/csync"
+	"github.com/abrekhov/crush/internal/lsp"
+	"github.com/abrekhov/crush/internal/skills"
 	"github.com/stretchr/testify/require"
 )
 

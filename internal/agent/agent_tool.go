@@ -7,9 +7,9 @@ import (
 
 	"charm.land/fantasy"
 
-	"github.com/charmbracelet/crush/internal/agent/prompt"
-	"github.com/charmbracelet/crush/internal/agent/tools"
-	"github.com/charmbracelet/crush/internal/config"
+	"github.com/abrekhov/crush/internal/agent/prompt"
+	"github.com/abrekhov/crush/internal/agent/tools"
+	"github.com/abrekhov/crush/internal/config"
 )
 
 //go:embed templates/agent_tool.md

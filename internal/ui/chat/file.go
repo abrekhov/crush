@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/crush/internal/agent/tools"
-	"github.com/charmbracelet/crush/internal/fsext"
-	"github.com/charmbracelet/crush/internal/message"
-	"github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/abrekhov/crush/internal/agent/tools"
+	"github.com/abrekhov/crush/internal/fsext"
+	"github.com/abrekhov/crush/internal/message"
+	"github.com/abrekhov/crush/internal/ui/styles"
 )
 
 // -----------------------------------------------------------------------------

@@ -12,9 +12,9 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/proto"
-	"github.com/charmbracelet/crush/internal/server"
+	"github.com/abrekhov/crush/internal/config"
+	"github.com/abrekhov/crush/internal/proto"
+	"github.com/abrekhov/crush/internal/server"
 )
 
 // DummyHost is used to satisfy the http.Client's requirement for a URL.

@@ -3,9 +3,9 @@ package model
 import (
 	"testing"
 
-	"github.com/charmbracelet/crush/internal/skills"
-	"github.com/charmbracelet/crush/internal/ui/common"
-	uistyles "github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/abrekhov/crush/internal/skills"
+	"github.com/abrekhov/crush/internal/ui/common"
+	uistyles "github.com/abrekhov/crush/internal/ui/styles"
 	"github.com/stretchr/testify/require"
 )
 

@@ -9,11 +9,11 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"github.com/charmbracelet/crush/internal/commands"
-	"github.com/charmbracelet/crush/internal/config"
-	"github.com/charmbracelet/crush/internal/ui/common"
-	"github.com/charmbracelet/crush/internal/ui/list"
-	"github.com/charmbracelet/crush/internal/ui/styles"
+	"github.com/abrekhov/crush/internal/commands"
+	"github.com/abrekhov/crush/internal/config"
+	"github.com/abrekhov/crush/internal/ui/common"
+	"github.com/abrekhov/crush/internal/ui/list"
+	"github.com/abrekhov/crush/internal/ui/styles"
 	uv "github.com/charmbracelet/ultraviolet"
 )
 

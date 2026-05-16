@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/charmbracelet/crush/internal/env"
+	"github.com/abrekhov/crush/internal/env"
 	"github.com/stretchr/testify/require"
 )
 
