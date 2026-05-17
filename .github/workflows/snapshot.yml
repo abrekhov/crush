@@ -14,21 +14,19 @@ concurrency:
 
 jobs:
   snapshot:
-    runs-on:
-      # Use our own large runners with more CPU and RAM for faster builds
-      group: releasers
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: goreleaser/goreleaser-action@e24998b8b67b290c2fa8b7c14fcfa7de2c5c9b8c # v7.1.0
+      - uses: goreleaser/goreleaser-action@v6
         with:
-          version: "nightly"
-          distribution: goreleaser-pro
+          distribution: goreleaser
+          version: latest
           args: build --snapshot --clean
         env:
-          GORELEASER_KEY: ${{ secrets.GORELEASER_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
