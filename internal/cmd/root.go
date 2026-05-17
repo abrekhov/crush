@@ -117,26 +117,7 @@ crush --continue
 			sessionID = sess.ID
 		}
 
-		event.AppInitialized()
-
-		com := common.DefaultCommon(ws)
-		model := ui.New(com, sessionID, continueLast)
-
-		var env uv.Environ = os.Environ()
-		program := tea.NewProgram(
-			model,
-			tea.WithEnvironment(env),
-			tea.WithContext(cmd.Context()),
-			tea.WithFilter(ui.MouseEventFilter),
-		)
-		go ws.Subscribe(program)
-
-		if _, err := program.Run(); err != nil {
-			event.Error(err)
-			slog.Error("TUI run error", "error", err)
-			return errors.New("Crush crashed. If metrics are enabled, we were notified about it. If you'd like to report it, please copy the stacktrace above and open an issue at https://github.com/abrekhov/crush/issues/new?template=bug.yml") //nolint:staticcheck
-		}
-		return nil
+		return runTUI(cmd, ws, sessionID, continueLast)
 	},
 }
 
@@ -611,6 +592,107 @@ func createDotCrushDir(dir string) error {
 	}
 
 	return nil
+}
+
+// runTUI initializes and runs the BubbleTea TUI for the given workspace.
+func runTUI(cmd *cobra.Command, ws workspace.Workspace, sessionID string, continueLast bool) error {
+	event.AppInitialized()
+
+	com := common.DefaultCommon(ws)
+	model := ui.New(com, sessionID, continueLast)
+
+	var env uv.Environ = os.Environ()
+	program := tea.NewProgram(
+		model,
+		tea.WithEnvironment(env),
+		tea.WithContext(cmd.Context()),
+		tea.WithFilter(ui.MouseEventFilter),
+	)
+	go ws.Subscribe(program)
+
+	if _, err := program.Run(); err != nil {
+		event.Error(err)
+		slog.Error("TUI run error", "error", err)
+		return errors.New("Crush crashed. If metrics are enabled, we were notified about it. If you'd like to report it, please copy the stacktrace above and open an issue at https://github.com/abrekhov/crush/issues/new?template=bug.yml") //nolint:staticcheck
+	}
+	return nil
+}
+
+// connectToServerOnly creates a client connection to an already-running server
+// without auto-starting one. Returns a clear error if the server is not
+// reachable.
+func connectToServerOnly(cmd *cobra.Command, hostURL *url.URL) (*client.Client, *proto.Workspace, func(), error) {
+	debug, _ := cmd.Flags().GetBool("debug")
+	yolo, _ := cmd.Flags().GetBool("yolo")
+	dataDir, _ := cmd.Flags().GetString("data-dir")
+	ctx := cmd.Context()
+
+	cwd, err := ResolveCwd(cmd)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	c, err := client.NewClient(cwd, hostURL.Scheme, hostURL.Host)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	wsReq := proto.Workspace{
+		Path:    cwd,
+		DataDir: dataDir,
+		Debug:   debug,
+		YOLO:    yolo,
+		Version: version.Version,
+		Env:     os.Environ(),
+	}
+
+	ws, err := c.CreateWorkspace(ctx, wsReq)
+	if err != nil {
+		// Retry briefly — socket may exist but HTTP handler not yet ready.
+		for range 5 {
+			select {
+			case <-ctx.Done():
+				return nil, nil, nil, ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+			ws, err = c.CreateWorkspace(ctx, wsReq)
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("no server running at %s: %v", hostURL.Host, err)
+		}
+	}
+
+	if shouldEnableMetrics(ws.Config) {
+		event.Init()
+	}
+
+	if ws.Config != nil {
+		logFile := filepath.Join(ws.Config.Options.DataDirectory, "logs", "crush.log")
+		crushlog.Setup(logFile, debug)
+	}
+
+	cleanup := func() { _ = c.DeleteWorkspace(context.Background(), ws.ID) }
+	return c, ws, cleanup, nil
+}
+
+// setupAttachWorkspace connects to a running server and returns a
+// ClientWorkspace ready for use with runTUI. It does NOT auto-start a server.
+func setupAttachWorkspace(cmd *cobra.Command, hostURL *url.URL) (workspace.Workspace, func(), error) {
+	c, protoWs, cleanup, err := connectToServerOnly(cmd, hostURL)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	clientWs := workspace.NewClientWorkspace(c, *protoWs)
+	if protoWs.Config.IsConfigured() {
+		if err := clientWs.InitCoderAgent(cmd.Context()); err != nil {
+			slog.Error("Failed to initialize coder agent", "error", err)
+		}
+	}
+	return clientWs, cleanup, nil
 }
 
 //go:embed gitignore/old
