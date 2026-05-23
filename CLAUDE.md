@@ -55,9 +55,9 @@ go test ./internal/agent/...     # agent loop (uses VCR recordings)
 ### Install
 
 ```bash
-# Replace v0.1.0 with the actual release tag
-VERSION=v0.1.0
-curl -L "https://github.com/abrekhov/crush/releases/download/${VERSION}/crush_${VERSION}_Linux_x86_64.tar.gz" \
+# Replace 0.1.0 with the actual version number (no "v" in the archive filename)
+VERSION=0.1.0
+curl -L "https://github.com/abrekhov/crush/releases/download/v${VERSION}/crush_${VERSION}_Linux_x86_64.tar.gz" \
   | tar -xz --strip-components=1
 sudo install -m755 crush /usr/local/bin/crush
 crush --version
