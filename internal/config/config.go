@@ -17,6 +17,7 @@ import (
 	"github.com/abrekhov/crush/internal/csync"
 	"github.com/abrekhov/crush/internal/env"
 	"github.com/abrekhov/crush/internal/oauth"
+	anthropicauth "github.com/abrekhov/crush/internal/oauth/anthropic"
 	"github.com/abrekhov/crush/internal/oauth/copilot"
 	"github.com/invopop/jsonschema"
 )
@@ -156,6 +157,12 @@ func (c *ProviderConfig) ToProvider() catwalk.Provider {
 
 func (c *ProviderConfig) SetupGitHubCopilot() {
 	maps.Copy(c.ExtraHeaders, copilot.Headers())
+}
+
+// SetupAnthropicOAuth configures the provider to use an OAuth access token
+// instead of a plain API key by adding the required beta header.
+func (c *ProviderConfig) SetupAnthropicOAuth() {
+	maps.Copy(c.ExtraHeaders, anthropicauth.Headers())
 }
 
 type MCPType string

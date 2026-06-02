@@ -13,6 +13,7 @@ import (
 	hyperp "github.com/abrekhov/crush/internal/agent/hyper"
 	"github.com/abrekhov/crush/internal/env"
 	"github.com/abrekhov/crush/internal/oauth"
+	anthropicauth "github.com/abrekhov/crush/internal/oauth/anthropic"
 	"github.com/abrekhov/crush/internal/oauth/copilot"
 	"github.com/abrekhov/crush/internal/oauth/hyper"
 	"github.com/tidwall/gjson"
@@ -249,6 +250,8 @@ func (s *ConfigStore) SetProviderAPIKey(scope Scope, providerID string, apiKey a
 			switch providerID {
 			case string(catwalk.InferenceProviderCopilot):
 				providerConfig.SetupGitHubCopilot()
+			case string(catwalk.InferenceProviderAnthropic):
+				providerConfig.SetupAnthropicOAuth()
 			}
 		}
 	}
@@ -305,6 +308,8 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 		newToken, refreshErr = copilot.RefreshToken(ctx, providerConfig.OAuthToken.RefreshToken)
 	case hyperp.Name:
 		newToken, refreshErr = hyper.ExchangeToken(ctx, providerConfig.OAuthToken.RefreshToken)
+	case string(catwalk.InferenceProviderAnthropic):
+		newToken, refreshErr = anthropicauth.RefreshToken(ctx, providerConfig.OAuthToken.RefreshToken)
 	default:
 		return fmt.Errorf("OAuth refresh not supported for provider %s", providerID)
 	}
@@ -319,6 +324,8 @@ func (s *ConfigStore) RefreshOAuthToken(ctx context.Context, scope Scope, provid
 	switch providerID {
 	case string(catwalk.InferenceProviderCopilot):
 		providerConfig.SetupGitHubCopilot()
+	case string(catwalk.InferenceProviderAnthropic):
+		providerConfig.SetupAnthropicOAuth()
 	}
 
 	s.config.Providers.Set(providerID, providerConfig)

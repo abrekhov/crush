@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"bufio"
 	"cmp"
 	"context"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 
 	"charm.land/lipgloss/v2"
 	"github.com/atotto/clipboard"
@@ -13,6 +15,7 @@ import (
 	"github.com/abrekhov/crush/internal/client"
 	"github.com/abrekhov/crush/internal/config"
 	"github.com/abrekhov/crush/internal/oauth"
+	anthropicauth "github.com/abrekhov/crush/internal/oauth/anthropic"
 	"github.com/abrekhov/crush/internal/oauth/copilot"
 	"github.com/abrekhov/crush/internal/oauth/hyper"
 	"github.com/charmbracelet/x/ansi"
@@ -26,8 +29,11 @@ var loginCmd = &cobra.Command{
 	Short:   "Login Crush to a platform",
 	Long: `Login Crush to a specified platform.
 The platform should be provided as an argument.
-Available platforms are: hyper, copilot.`,
+Available platforms are: anthropic, hyper, copilot.`,
 	Example: `
+# Authenticate with claude.ai (Pro/Max subscription)
+crush login anthropic
+
 # Authenticate with Charm Hyper
 crush login
 
@@ -35,6 +41,8 @@ crush login
 crush login copilot
   `,
 	ValidArgs: []cobra.Completion{
+		"anthropic",
+		"claude",
 		"hyper",
 		"copilot",
 		"github",
@@ -59,6 +67,8 @@ crush login copilot
 			provider = args[0]
 		}
 		switch provider {
+		case "anthropic", "claude":
+			return loginAnthropic(cmd.Context(), c, ws.ID)
 		case "hyper":
 			return loginHyper(c, ws.ID)
 		case "copilot", "github", "github-copilot":
@@ -67,6 +77,51 @@ crush login copilot
 			return fmt.Errorf("unknown platform: %s", args[0])
 		}
 	},
+}
+
+func loginAnthropic(ctx context.Context, c *client.Client, wsID string) error {
+	authReq, err := anthropicauth.NewAuthRequest()
+	if err != nil {
+		return fmt.Errorf("prepare authorization request: %w", err)
+	}
+
+	fmt.Println("Open the following URL in your browser to log in with your claude.ai account:")
+	fmt.Println()
+	fmt.Println(lipgloss.NewStyle().Hyperlink(authReq.URL, "id=anthropic").Render(authReq.URL))
+	fmt.Println()
+	fmt.Println("After authorizing, you will be redirected to a page at console.anthropic.com.")
+	fmt.Println("Copy the 'code' parameter value from the URL in your browser's address bar,")
+	fmt.Println("then paste it below.")
+	fmt.Println()
+
+	if err := browser.OpenURL(authReq.URL); err != nil {
+		fmt.Println("(Could not open browser automatically — please copy the URL above.)")
+	}
+
+	fmt.Print("Authorization code: ")
+	scanner := bufio.NewScanner(os.Stdin)
+	scanner.Scan()
+	code := strings.TrimSpace(scanner.Text())
+	if code == "" {
+		return fmt.Errorf("no authorization code provided")
+	}
+
+	fmt.Println("Exchanging code for tokens...")
+	token, err := anthropicauth.ExchangeCode(ctx, code, authReq.Verifier)
+	if err != nil {
+		return fmt.Errorf("token exchange failed: %w", err)
+	}
+
+	if err := cmp.Or(
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers.anthropic.api_key", token.AccessToken),
+		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers.anthropic.oauth", token),
+	); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println("You're now authenticated with claude.ai!")
+	return nil
 }
 
 func loginHyper(c *client.Client, wsID string) error {
