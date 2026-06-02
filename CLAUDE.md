@@ -128,6 +128,40 @@ Override with `--host unix:///custom/path.sock` on both `crush server` and `crus
 | `release.yml` | push tag `v*.*.*` | goreleaser release → GitHub Releases |
 | `security.yml` | push/PR/nightly | CodeQL, Grype, govulncheck |
 
+## Authentication (providers)
+
+### claude.ai Pro/Max subscription (OAuth)
+
+```bash
+# On the VPS (or any machine with crush installed):
+crush login anthropic
+# Prints a claude.ai authorization URL → open in browser → authorize →
+# paste the 'code' from the redirect URL back into the prompt.
+```
+
+OAuth details (implementation in `internal/oauth/anthropic/pkce.go`):
+- **Client ID**: `9d1c250a-e61b-44d9-88ed-5944d1962f5e`
+- **Auth URL**: `https://claude.ai/oauth/authorize`
+- **Token URL**: `https://console.anthropic.com/v1/oauth/token`
+- **Redirect URI**: `https://console.anthropic.com/oauth/code/callback`
+- **Scopes**: `org:create_api_key user:profile user:inference`
+- **PKCE**: S256 (no client secret needed)
+
+Tokens are stored in `~/.config/crush/config.json` under `providers.anthropic.oauth`.
+The access token auto-refreshes via `providers.anthropic.oauth.refresh_token`.
+
+### GitHub Copilot
+
+```bash
+crush login copilot
+```
+
+### Hyper
+
+```bash
+crush login hyper   # or just: crush login
+```
+
 ## Development notes
 
 - CGO is disabled (`CGO_ENABLED=0`) — pure Go binary, runs everywhere
