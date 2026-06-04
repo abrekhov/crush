@@ -21,13 +21,20 @@ const (
 	// ClientID is the public OAuth client identifier for Claude Code CLI.
 	ClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
-	authURL     = "https://claude.ai/oauth/authorize"
-	tokenURL    = "https://console.anthropic.com/v1/oauth/token"
-	redirectURI = "https://console.anthropic.com/oauth/code/callback"
-	scopes      = "org:create_api_key user:profile user:inference"
+	defaultAuthURL     = "https://claude.ai/oauth/authorize"
+	defaultTokenURL    = "https://console.anthropic.com/v1/oauth/token"
+	defaultRedirectURI = "https://console.anthropic.com/oauth/code/callback"
+	scopes             = "org:create_api_key user:profile user:inference"
 
 	// OAuthBetaHeader is the required beta header for API calls using OAuth tokens.
 	OAuthBetaHeader = "oauth-2025-04-20"
+)
+
+// These vars are package-level so tests can override them.
+var (
+	authURL     = defaultAuthURL
+	tokenURL    = defaultTokenURL
+	redirectURI = defaultRedirectURI
 )
 
 // Headers returns extra HTTP headers needed for Anthropic OAuth-authenticated API calls.
