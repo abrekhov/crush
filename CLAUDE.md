@@ -30,7 +30,9 @@ Key helpers in `root.go`:
 
 ## Branching & releases
 
-- **`main`** — mainline branch; push here to trigger snapshot builds
+Single developer — commit and push directly to `main`. No PRs, no feature branches needed.
+
+- **`main`** — only branch; push here for all changes
 - **Tags `v*.*.*`** — trigger GitHub Releases with multi-platform binaries via goreleaser (free edition)
 
 To cut a release:
