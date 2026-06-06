@@ -67,6 +67,7 @@ crush run --continue "Follow up on your last response"
 			smallModel, _ = cmd.Flags().GetString("small-model")
 			sessionID, _  = cmd.Flags().GetString("session")
 			useLast, _    = cmd.Flags().GetBool("continue")
+			detach, _     = cmd.Flags().GetBool("detach")
 		)
 
 		// Cancel on SIGINT or SIGTERM.
@@ -119,7 +120,7 @@ crush run --continue "Follow up on your last response"
 				slog.SetDefault(slog.New(log.New(os.Stderr)))
 			}
 
-			return runNonInteractive(ctx, c, ws, prompt, largeModel, smallModel, quiet || verbose, sessionID, useLast)
+			return runNonInteractive(ctx, c, ws, prompt, largeModel, smallModel, quiet || verbose, sessionID, useLast, detach)
 		}
 
 		ws, cleanup, err := setupLocalWorkspace(cmd)
@@ -150,6 +151,7 @@ func init() {
 	runCmd.Flags().String("small-model", "", "Small model to use. If not provided, uses the default small model for the provider")
 	runCmd.Flags().StringP("session", "s", "", "Continue a previous session by ID")
 	runCmd.Flags().BoolP("continue", "C", false, "Continue the most recent session")
+	runCmd.Flags().Bool("detach", false, "Submit prompt and exit immediately; agent keeps running on server")
 	runCmd.MarkFlagsMutuallyExclusive("session", "continue")
 }
 
@@ -163,6 +165,7 @@ func runNonInteractive(
 	hideSpinner bool,
 	continueSessionID string,
 	useLast bool,
+	detach bool,
 ) error {
 	slog.Info("Running in non-interactive mode")
 
@@ -247,6 +250,15 @@ func runNonInteractive(
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
+	shortID := session.HashID(sess.ID)
+	fmt.Fprintf(os.Stderr, "Session: %s  (reconnect: crush attach --session %s)\n", shortID, shortID)
+
+	if detach {
+		stopSpinner()
+		fmt.Fprintf(os.Stderr, "Detached — agent runs in background on server.\n")
+		return nil
+	}
+
 	messageReadBytes := make(map[string]int)
 	var printed bool
 
@@ -309,7 +321,8 @@ func runNonInteractive(
 
 		case <-ctx.Done():
 			stopSpinner()
-			return ctx.Err()
+			fmt.Fprintf(os.Stderr, "\nDetached — agent continues on server.\nReconnect: crush attach --session %s\n", shortID)
+			return nil
 		}
 	}
 }
