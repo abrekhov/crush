@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"image/color"
 
-	"github.com/alecthomas/chroma/v2/formatters"
-	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/abrekhov/crush/internal/ui/styles"
 	"github.com/abrekhov/crush/internal/ui/xchroma"
+	"github.com/alecthomas/chroma/v2/formatters"
+	"github.com/alecthomas/chroma/v2/lexers"
 )
 
 // SyntaxHighlight applies syntax highlighting to the given source code based

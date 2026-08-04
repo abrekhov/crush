@@ -5,9 +5,9 @@ import (
 	"sync"
 
 	"charm.land/glamour/v2"
-	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/abrekhov/crush/internal/ui/styles"
 	"github.com/abrekhov/crush/internal/ui/xchroma"
+	"github.com/alecthomas/chroma/v2/formatters"
 )
 
 const formatterName = "crush"

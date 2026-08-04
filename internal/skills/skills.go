@@ -14,8 +14,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/charlievieth/fastwalk"
 	"github.com/abrekhov/crush/internal/pubsub"
+	"github.com/charlievieth/fastwalk"
 	"gopkg.in/yaml.v3"
 )
 

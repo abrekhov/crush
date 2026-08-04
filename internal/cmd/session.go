@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-	"github.com/charmbracelet/colorprofile"
 	"github.com/abrekhov/crush/internal/agent/tools"
 	"github.com/abrekhov/crush/internal/config"
 	"github.com/abrekhov/crush/internal/db"
@@ -24,6 +23,7 @@ import (
 	"github.com/abrekhov/crush/internal/session"
 	"github.com/abrekhov/crush/internal/ui/chat"
 	"github.com/abrekhov/crush/internal/ui/styles"
+	"github.com/charmbracelet/colorprofile"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/charmtone"
 	"github.com/charmbracelet/x/term"

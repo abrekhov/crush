@@ -4,9 +4,9 @@ import (
 	"image/color"
 	"sync"
 
+	"github.com/abrekhov/crush/internal/ui/styles"
 	"github.com/alecthomas/chroma/v2"
 	chromastyles "github.com/alecthomas/chroma/v2/styles"
-	"github.com/abrekhov/crush/internal/ui/styles"
 )
 
 // Building a chroma style from a theme (chroma.MustNewStyle) parses every

@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bmatcuk/doublestar/v4"
-	"github.com/charlievieth/fastwalk"
 	"github.com/abrekhov/crush/internal/csync"
 	"github.com/abrekhov/crush/internal/home"
+	"github.com/bmatcuk/doublestar/v4"
+	"github.com/charlievieth/fastwalk"
 	"github.com/charmbracelet/x/ansi"
 )
 
