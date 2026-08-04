@@ -344,7 +344,12 @@ type UI struct {
 	// agentBusyCache / yoloCache memoize the workspace busy and permission
 	// probes (synchronous HTTP round-trips in client/server mode). Reads
 	// never probe; refreshes happen off-thread (see workspace_cache.go).
-	agentBusyCache    ttlCache
+	agentBusyCache ttlCache
+	// sessionBusyCache memoizes whether the *current* session is generating.
+	// It needs no session key: every session switch invalidates it and
+	// re-dispatches the probe, and a probe result that raced a switch is
+	// discarded by applyBusyState's forSession guard.
+	sessionBusyCache  ttlCache
 	yoloCache         ttlCache
 	busyFetchInFlight bool
 	// agentReady / agentModel memoize the coordinator readiness and
@@ -1888,10 +1893,9 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 		}
 		m.dialog.CloseDialog(dialog.NotificationsID)
 	case dialog.ActionNewSession:
-		if m.isAgentBusy() {
-			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before starting a new session..."))
-			break
-		}
+		// Deliberately unguarded: newSession only resets the view, and runs
+		// are tracked per session, so the previous session keeps generating
+		// in the background while a new one is started.
 		if cmd := m.newSession(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -1998,7 +2002,8 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			cmds = append(cmds, cmd)
 		}
 	case dialog.ActionSelectReasoningEffort:
-		if m.isAgentBusy() {
+		// Coordinator-wide: rebuilds the provider for every session.
+		if m.isAnyAgentBusy() {
 			cmds = append(cmds, util.ReportWarn("Agent is busy, please wait..."))
 			break
 		}
@@ -2175,7 +2180,8 @@ func (m *UI) handleSelectModel(msg dialog.ActionSelectModel) tea.Cmd {
 	var cmds []tea.Cmd
 
 	// we ignore dialogs with the oauth id as they need to be able to be dismissed
-	if m.isAgentBusy() && !m.dialog.ContainsDialog(dialog.OAuthID) {
+	// Coordinator-wide: a model swap rebuilds the provider for every session.
+	if m.isAnyAgentBusy() && !m.dialog.ContainsDialog(dialog.OAuthID) {
 		return util.ReportWarn("Agent is busy, please wait...")
 	}
 
@@ -2350,7 +2356,8 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				return true
 			}
 		case key.Matches(msg, m.keyMap.Suspend):
-			if m.isAgentBusy() {
+			// Suspending stops the whole process, not just this session.
+			if m.isAnyAgentBusy() {
 				cmds = append(cmds, util.ReportWarn("Agent is busy, please wait..."))
 				return true
 			}
@@ -2521,10 +2528,8 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				if !m.hasSession() {
 					break
 				}
-				if m.isAgentBusy() {
-					cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before starting a new session..."))
-					break
-				}
+				// Unguarded: the previous session keeps running. See
+				// ActionNewSession.
 				if cmd := m.newSession(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
@@ -2679,10 +2684,8 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				if !m.hasSession() {
 					break
 				}
-				if m.isAgentBusy() {
-					cmds = append(cmds, util.ReportWarn("Agent is busy, please wait before starting a new session..."))
-					break
-				}
+				// Unguarded: the previous session keeps running. See
+				// ActionNewSession.
 				m.focus = uiFocusEditor
 				if cmd := m.newSession(); cmd != nil {
 					cmds = append(cmds, cmd)
@@ -3868,7 +3871,29 @@ func isWhitespace(b byte) bool {
 // per-message paths like the textarea placeholder, where a workspace probe
 // would be an HTTP round-trip per keystroke in client/server mode); the
 // value is refreshed off-thread, see workspace_cache.go.
+// isAgentBusy reports whether the *current* session is generating.
+//
+// This is what nearly every guard in the UI wants: spinners, placeholders,
+// the cancel binding, and starting/summarizing a session all concern the
+// session on screen. Sessions run concurrently in the agent core
+// (activeRequests is keyed by session ID), so gating them on workspace-wide
+// activity would block a second session for no reason.
+//
+// Use isAnyAgentBusy for the few guards that are genuinely coordinator-wide.
 func (m *UI) isAgentBusy() bool {
+	if m.bangCancel != nil {
+		return true
+	}
+	return m.sessionBusyCache.val
+}
+
+// isAnyAgentBusy reports whether any session in the workspace is generating.
+//
+// Reserved for actions that mutate shared coordinator state and would
+// therefore disturb other sessions' in-flight runs: changing the model or
+// reasoning effort (both rebuild the coordinator's provider) and suspending
+// the process. Everything else should use isAgentBusy.
+func (m *UI) isAnyAgentBusy() bool {
 	if m.bangCancel != nil {
 		return true
 	}
@@ -4040,7 +4065,10 @@ func (m *UI) sendMessage(content string, attachments ...message.Attachment) tea.
 	// idle value; the authoritative state arrives via agentRunSubmittedMsg.
 	// Bump the busy/queue generations so any probe started before this
 	// optimistic write is discarded rather than reverting us to idle.
+	// Both caches: the prompt makes this session busy, and therefore also
+	// makes the workspace non-idle.
 	m.agentBusyCache.set(true)
+	m.sessionBusyCache.set(true)
 	m.busyFetchGen++
 	m.invalidatePromptQueue()
 	cmds = append(cmds, func() tea.Msg {

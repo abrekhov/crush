@@ -71,10 +71,20 @@ type busyStateMsg struct {
 	// before a newer state transition (optimistic send, invalidation,
 	// session switch, ...) and is discarded, then re-fetched, so the
 	// authoritative refresh is never lost to an older in-flight request.
-	gen       uint64
-	ready     bool
+	gen uint64
+	// forSession is the session the session-scoped probe was scoped to. A
+	// result that raced a session switch is discarded and re-fetched, so
+	// sessionBusy is never applied to the wrong session.
+	forSession string
+	ready      bool
+	// agentBusy is workspace-wide: true when *any* session has an active
+	// run. Only the genuinely coordinator-wide guards (model and reasoning
+	// changes, process suspend) may use it — see isAnyAgentBusy.
 	agentBusy bool
-	yolo      bool
+	// sessionBusy is scoped to forSession. This is what the UI means by
+	// "busy" almost everywhere: whether *this* session is generating.
+	sessionBusy bool
+	yolo        bool
 	// model is the coordinator's selected model, fetched by the same probe
 	// so the sidebar/landing model info renders from memoized state. Zero
 	// (and ignored) when ready is false.
@@ -123,6 +133,7 @@ func (m *UI) currentSessionID() string {
 // state.
 func (m *UI) invalidateBusyCaches() {
 	m.agentBusyCache.invalidate()
+	m.sessionBusyCache.invalidate()
 	m.yoloCache.invalidate()
 	m.busyFetchGen++
 }
@@ -146,11 +157,18 @@ func (m *UI) dispatchBusyRefresh() tea.Cmd {
 	m.busyFetchInFlight = true
 	ws := m.com.Workspace
 	gen := m.busyFetchGen
+	sessionID := m.currentSessionID()
 	return func() tea.Msg {
-		st := busyStateMsg{gen: gen}
+		st := busyStateMsg{gen: gen, forSession: sessionID}
 		if ws.AgentIsReady() {
 			st.ready = true
 			st.agentBusy = ws.AgentIsBusy()
+			// With no session there is nothing session-scoped to be busy
+			// with, and probing for "" would cost a round-trip in
+			// client/server mode only to come back false.
+			if sessionID != "" {
+				st.sessionBusy = ws.AgentIsSessionBusy(sessionID)
+			}
 			st.model = ws.AgentModel()
 		}
 		st.yolo = ws.PermissionSkipRequests()
@@ -172,9 +190,10 @@ func (m *UI) updateAgentModelCmd(pre tea.Cmd) tea.Cmd {
 // edges (todo spinner, pills). Runs on the Update goroutine.
 func (m *UI) applyBusyState(msg busyStateMsg) []tea.Cmd {
 	m.busyFetchInFlight = false
-	if msg.gen != m.busyFetchGen {
+	if msg.gen != m.busyFetchGen || msg.forSession != m.currentSessionID() {
 		// This probe started before a newer state transition (optimistic
-		// send, invalidation, session switch, ...). Discard its result and
+		// send, invalidation) or was scoped to a session we have since
+		// switched away from. Discard its result and
 		// re-dispatch so the required authoritative refresh is not lost
 		// merely because this older request was in flight.
 		if cmd := m.dispatchBusyRefresh(); cmd != nil {
@@ -185,6 +204,7 @@ func (m *UI) applyBusyState(msg busyStateMsg) []tea.Cmd {
 	prevBusy := m.isAgentBusy()
 	prevYolo := m.yoloModeCached()
 	m.agentBusyCache.set(msg.agentBusy)
+	m.sessionBusyCache.set(msg.sessionBusy)
 	m.yoloCache.set(msg.yolo)
 	m.agentReady = msg.ready
 	m.agentModel = msg.model
@@ -281,7 +301,7 @@ func (m *UI) staleWorkspaceRefreshCmds() []tea.Cmd {
 		return nil
 	}
 	var cmds []tea.Cmd
-	if !m.agentBusyCache.fresh(busyCacheTTL) || !m.yoloCache.fresh(busyCacheTTL) {
+	if !m.agentBusyCache.fresh(busyCacheTTL) || !m.sessionBusyCache.fresh(busyCacheTTL) || !m.yoloCache.fresh(busyCacheTTL) {
 		if cmd := m.dispatchBusyRefresh(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}

@@ -29,29 +29,39 @@ import (
 type countingWorkspace struct {
 	workspace.Workspace
 
-	ready     bool
-	agentBusy bool
-	yolo      bool
-	queued    []string
-	model     workspace.AgentModel
-	lspStates map[string]workspace.LSPClientInfo
-	lspDiags  map[string]lsp.DiagnosticCounts
+	ready bool
+	// agentBusy is the workspace-wide probe; sessionBusy is the
+	// session-scoped one the UI uses for almost every guard.
+	agentBusy   bool
+	sessionBusy bool
+	yolo        bool
+	queued      []string
+	model       workspace.AgentModel
+	lspStates   map[string]workspace.LSPClientInfo
+	lspDiags    map[string]lsp.DiagnosticCounts
 
-	readyCalls      int
-	agentBusyCalls  int
-	queuedCalls     int
-	queueListCalls  int
-	permCalls       int
-	permSetCalls    int
-	clearQueueCalls int
-	cancelCalls     int
-	modelCalls      int
-	lspStateCalls   int
-	lspDiagCalls    int
+	readyCalls       int
+	agentBusyCalls   int
+	sessionBusyCalls int
+	queuedCalls      int
+	queueListCalls   int
+	permCalls        int
+	permSetCalls     int
+	clearQueueCalls  int
+	cancelCalls      int
+	modelCalls       int
+	lspStateCalls    int
+	lspDiagCalls     int
+	lspStopAllCalls  int
 }
 
 func (w *countingWorkspace) AgentIsReady() bool { w.readyCalls++; return w.ready }
 func (w *countingWorkspace) AgentIsBusy() bool  { w.agentBusyCalls++; return w.agentBusy }
+
+func (w *countingWorkspace) AgentIsSessionBusy(string) bool {
+	w.sessionBusyCalls++
+	return w.sessionBusy
+}
 
 func (w *countingWorkspace) AgentReadyErr() error {
 	w.readyCalls++
@@ -106,19 +116,27 @@ func (w *countingWorkspace) ListUserMessages(context.Context, string) ([]message
 
 func (w *countingWorkspace) LSPStart(context.Context, string) {}
 
+func (w *countingWorkspace) LSPStopAll(context.Context) { w.lspStopAllCalls++ }
+
+func (w *countingWorkspace) ListAllUserMessages(context.Context) ([]message.Message, error) {
+	return nil, nil
+}
+
+func (w *countingWorkspace) SetCurrentSession(context.Context, string) error { return nil }
+
 func (w *countingWorkspace) Config() *config.Config { return nil }
 
 // syncProbes sums every synchronous counter; Update/View must keep this at
 // zero — the invariant is that no workspace call ever happens on the Update
 // goroutine (which is also the render loop).
 func (w *countingWorkspace) syncProbes() int {
-	return w.readyCalls + w.agentBusyCalls +
+	return w.readyCalls + w.agentBusyCalls + w.sessionBusyCalls +
 		w.queuedCalls + w.queueListCalls + w.permCalls +
 		w.modelCalls + w.lspStateCalls + w.lspDiagCalls
 }
 
 func (w *countingWorkspace) resetCounters() {
-	w.readyCalls, w.agentBusyCalls = 0, 0
+	w.readyCalls, w.agentBusyCalls, w.sessionBusyCalls = 0, 0, 0
 	w.queuedCalls, w.queueListCalls, w.permCalls = 0, 0, 0
 	w.permSetCalls, w.clearQueueCalls, w.cancelCalls = 0, 0, 0
 	w.modelCalls, w.lspStateCalls, w.lspDiagCalls = 0, 0, 0
@@ -160,6 +178,9 @@ func pinTTLs(t *testing.T) {
 // invalidation (not startup staleness) can trigger refresh dispatches.
 func warmCaches(m *UI, busy bool) {
 	m.agentBusyCache.set(busy)
+	// These tests exercise a single session, where "this session is busy"
+	// and "the workspace is busy" coincide.
+	m.sessionBusyCache.set(busy)
 	m.yoloCache.set(false)
 	m.agentReady = true
 	m.promptQueueCheckedAt = time.Now()
@@ -216,7 +237,7 @@ func TestUpdateDoesNotProbeWorkspacePerMessage(t *testing.T) {
 func TestReadsNeverProbeWorkspace(t *testing.T) {
 	pinTTLs(t)
 
-	ws := &countingWorkspace{ready: true, agentBusy: true}
+	ws := &countingWorkspace{ready: true, agentBusy: true, sessionBusy: true}
 	m := newBusyUI(ws)
 
 	for range 10 {
@@ -258,7 +279,7 @@ func TestStreamingUpdatedEventsDoNotProbe(t *testing.T) {
 func TestMessageCreatedEventRefreshesBusyAndQueue(t *testing.T) {
 	pinTTLs(t)
 
-	ws := &countingWorkspace{ready: true, agentBusy: true, queued: []string{"queued prompt"}}
+	ws := &countingWorkspace{ready: true, agentBusy: true, sessionBusy: true, queued: []string{"queued prompt"}}
 	m := newBusyUI(ws)
 	warmCaches(m, false)
 	ws.resetCounters()
@@ -377,7 +398,7 @@ func TestLocalYoloToggleSupersedesInFlightProbe(t *testing.T) {
 
 	// The stale probe (old generation, old yolo=false) lands.
 	m.busyFetchInFlight = true
-	cmds := m.applyBusyState(busyStateMsg{gen: staleGen, yolo: false})
+	cmds := m.applyBusyState(busyStateMsg{gen: staleGen, forSession: "s1", yolo: false})
 	require.True(t, m.yoloModeCached(),
 		"stale probe must not overwrite the freshly toggled value")
 	require.NotEmpty(t, cmds, "stale probe must re-dispatch an authoritative refresh")
@@ -441,7 +462,7 @@ func TestCancelAgentClearsQueueFromCachedCount(t *testing.T) {
 func TestBackstopRefreshesStaleCaches(t *testing.T) {
 	pinTTLs(t)
 
-	ws := &countingWorkspace{ready: true, agentBusy: true}
+	ws := &countingWorkspace{ready: true, agentBusy: true, sessionBusy: true}
 	m := newBusyUI(ws)
 	// Caches start at their zero value: stale by definition.
 
@@ -516,11 +537,14 @@ func TestStaleBusyRefreshDiscardedAndReDispatched(t *testing.T) {
 	// with, then a newer transition (optimistic send) supersedes it.
 	m.busyFetchInFlight = true
 	staleGen := m.busyFetchGen
-	m.agentBusyCache.set(true) // optimistic busy
-	m.busyFetchGen++           // newer state transition
+	// Optimistic busy, written through both caches exactly as sendMessage
+	// does.
+	m.agentBusyCache.set(true)
+	m.sessionBusyCache.set(true)
+	m.busyFetchGen++ // newer state transition
 
 	// The stale probe (agent reported idle) lands with the old generation.
-	cmds := m.applyBusyState(busyStateMsg{gen: staleGen, agentBusy: false})
+	cmds := m.applyBusyState(busyStateMsg{gen: staleGen, forSession: "s1", agentBusy: false})
 	require.True(t, m.isAgentBusy(),
 		"a stale busy result must not overwrite the newer optimistic busy state")
 	require.NotEmpty(t, cmds,
@@ -529,7 +553,7 @@ func TestStaleBusyRefreshDiscardedAndReDispatched(t *testing.T) {
 
 	// The fresh probe (matching generation) is applied normally.
 	freshGen := m.busyFetchGen
-	m.applyBusyState(busyStateMsg{gen: freshGen, agentBusy: false})
+	m.applyBusyState(busyStateMsg{gen: freshGen, forSession: "s1", agentBusy: false})
 	require.False(t, m.isAgentBusy(), "a current-generation result must land in the cache")
 }
 
@@ -762,7 +786,7 @@ func TestRemoteYoloToggleUpdatesEditorPrompt(t *testing.T) {
 	normalPrompt := ansi.Strip(m.textarea.View())
 
 	// A remote toggle flips yolo on; delivered via an off-thread refresh.
-	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, yolo: true})
+	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, forSession: "s1", yolo: true})
 	require.True(t, m.yoloModeCached(), "the refresh must write the new yolo value through the cache")
 	yoloPrompt := ansi.Strip(m.textarea.View())
 	require.NotEqual(t, normalPrompt, yoloPrompt,
@@ -771,8 +795,87 @@ func TestRemoteYoloToggleUpdatesEditorPrompt(t *testing.T) {
 		"the yolo prompt icon must render after a remote toggle")
 
 	// Flipping back off must restore the normal prompt.
-	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, yolo: false})
+	m.applyBusyState(busyStateMsg{gen: m.busyFetchGen, forSession: "s1", yolo: false})
 	require.False(t, m.yoloModeCached())
 	require.Equal(t, normalPrompt, ansi.Strip(m.textarea.View()),
 		"toggling yolo off must restore the normal editor prompt")
+}
+
+// TestBusyIsSessionScoped pins the split between the two busy notions: the
+// UI's default busy check follows the *current* session, while the
+// workspace-wide check follows any session. Sessions run concurrently in the
+// agent core (activeRequests is keyed by session ID), so a run in some other
+// session must not make this one look busy.
+func TestBusyIsSessionScoped(t *testing.T) {
+	pinTTLs(t)
+
+	// Another session is generating; ours is idle.
+	ws := &countingWorkspace{ready: true, agentBusy: true, sessionBusy: false}
+	m := newBusyUI(ws)
+	runCmds(m, m.dispatchBusyRefresh())
+
+	require.False(t, m.isAgentBusy(),
+		"a run in a different session must not mark this session busy")
+	require.True(t, m.isAnyAgentBusy(),
+		"the workspace-wide check must still see the other session's run")
+}
+
+// TestNewSessionNotBlockedByRunningSession pins the regression this split
+// fixes: starting a new session while the current one is generating used to
+// be rejected with "Agent is busy". newSession only resets the view, so it
+// must go through and leave the previous run untouched.
+func TestNewSessionNotBlockedByRunningSession(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true, agentBusy: true, sessionBusy: true}
+	m := newBusyUI(ws)
+	warmCaches(m, true)
+	require.True(t, m.isAgentBusy(), "precondition: the current session is generating")
+
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'n', Mod: tea.ModCtrl})
+	runCmds(m, cmd)
+
+	require.Nil(t, m.session, "a new session must be started even while one is generating")
+	require.Zero(t, ws.cancelCalls, "starting a new session must not cancel the running one")
+}
+
+// TestSessionScopedProbeSkippedWithoutSession: with no active session there
+// is nothing session-scoped to probe, and doing so would cost a wasted HTTP
+// round-trip in client/server mode.
+func TestSessionScopedProbeSkippedWithoutSession(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true, agentBusy: true}
+	m := newBusyUI(ws)
+	m.session = nil
+	ws.resetCounters()
+
+	runCmds(m, m.dispatchBusyRefresh())
+
+	require.Zero(t, ws.sessionBusyCalls,
+		"the session-scoped probe must be skipped when there is no session")
+	require.False(t, m.isAgentBusy())
+}
+
+// TestStaleSessionScopedResultDiscarded pins the forSession guard: a probe
+// that lands after a session switch describes the session we left, and
+// applying it would show the wrong busy state for the session now on screen.
+func TestStaleSessionScopedResultDiscarded(t *testing.T) {
+	pinTTLs(t)
+
+	ws := &countingWorkspace{ready: true}
+	m := newBusyUI(ws)
+	warmCaches(m, false)
+	m.busyFetchInFlight = true
+
+	// A probe scoped to the previous session reports busy, but we have
+	// since switched to "s2".
+	m.session = &session.Session{ID: "s2"}
+	cmds := m.applyBusyState(busyStateMsg{
+		gen: m.busyFetchGen, forSession: "s1", sessionBusy: true,
+	})
+
+	require.False(t, m.isAgentBusy(),
+		"a result scoped to the session we left must not be applied")
+	require.NotEmpty(t, cmds, "the discarded result must re-dispatch a scoped probe")
 }
