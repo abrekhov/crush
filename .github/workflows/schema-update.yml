@@ -2,7 +2,7 @@ name: Update files
 
 on:
   push:
-    branches: [main]
+    branches: [abrekhov/main]
     paths:
       - "internal/config/**"
       - "internal/agent/hyper/**"

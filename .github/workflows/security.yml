@@ -3,7 +3,7 @@ name: "security"
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [abrekhov/main]
   schedule:
     - cron: "0 2 * * *"
 

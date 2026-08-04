@@ -1,7 +1,7 @@
 name: lint
 on:
   push:
-    branches: [main]
+    branches: [abrekhov/main]
   pull_request:
 
 jobs:

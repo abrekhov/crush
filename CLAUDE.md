@@ -30,10 +30,28 @@ Key helpers in `root.go`:
 
 ## Branching & releases
 
-Single developer — commit and push directly to `main`. No PRs, no feature branches needed.
+Two long-lived branches:
 
-- **`main`** — only branch; push here for all changes
+- **`main`** — a read-only mirror of `upstream/main` (charmbracelet/crush). Never commit here.
+  It exists purely so upstream history stays clean and resettable.
+- **`abrekhov/main`** — the working branch. All fork features land here; this is the
+  default branch on GitHub and the only branch CI builds.
 - **Tags `v*.*.*`** — trigger GitHub Releases with multi-platform binaries via goreleaser (free edition)
+
+Single developer — commit and push directly to `abrekhov/main`. No PRs, no feature branches needed.
+
+To absorb upstream changes:
+```bash
+git fetch upstream
+git checkout main && git merge --ff-only upstream/main   # mirror, never conflicts
+git checkout abrekhov/main
+git tag pre-upstream-$(date +%Y%m%d)                     # bisect anchor
+git merge main                                           # conflicts resolved here only
+```
+
+If a merge goes wrong, `git merge --abort` and retry — `main` is always pristine.
+Expect `internal/config/config.go` to conflict every time: upstream deletes the
+`providers.anthropic` block to force onboarding, and this fork restores it.
 
 To cut a release:
 ```bash

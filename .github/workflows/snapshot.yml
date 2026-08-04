@@ -3,7 +3,7 @@ name: snapshot
 on:
   push:
     branches:
-      - main
+      - abrekhov/main
 
 permissions:
   contents: read
