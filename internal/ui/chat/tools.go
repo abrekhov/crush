@@ -14,10 +14,12 @@ import (
 	"github.com/abrekhov/crush/internal/agent/tools"
 	"github.com/abrekhov/crush/internal/diff"
 	"github.com/abrekhov/crush/internal/fsext"
+	"github.com/abrekhov/crush/internal/hooks"
 	"github.com/abrekhov/crush/internal/message"
 	"github.com/abrekhov/crush/internal/stringext"
 	"github.com/abrekhov/crush/internal/ui/anim"
 	"github.com/abrekhov/crush/internal/ui/common"
+	"github.com/abrekhov/crush/internal/ui/list"
 	"github.com/abrekhov/crush/internal/ui/styles"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -134,6 +136,7 @@ func (f ToolRendererFunc) RenderTool(sty *styles.Styles, width int, opts *ToolRe
 
 // baseToolMessageItem represents a tool call message that can be displayed in the UI.
 type baseToolMessageItem struct {
+	*list.Versioned
 	*highlightableMessageItem
 	*cachedMessageItem
 	*focusableMessageItem
@@ -175,10 +178,12 @@ func newBaseToolMessageItem(
 		status = ToolStatusCanceled
 	}
 
+	v := list.NewVersioned()
 	t := &baseToolMessageItem{
-		highlightableMessageItem: defaultHighlighter(sty),
+		Versioned:                v,
+		highlightableMessageItem: defaultHighlighter(sty, v),
 		cachedMessageItem:        &cachedMessageItem{},
-		focusableMessageItem:     &focusableMessageItem{},
+		focusableMessageItem:     newFocusableMessageItem(v),
 		sty:                      sty,
 		toolRenderer:             toolRenderer,
 		toolCall:                 toolCall,
@@ -189,9 +194,9 @@ func newBaseToolMessageItem(
 	t.anim = anim.New(anim.Settings{
 		ID:          toolCall.ID,
 		Size:        15,
-		GradColorA:  sty.Primary,
-		GradColorB:  sty.Secondary,
-		LabelColor:  sty.FgBase,
+		GradColorA:  sty.WorkingGradFromColor,
+		GradColorB:  sty.WorkingGradToColor,
+		LabelColor:  sty.WorkingLabelColor,
 		CycleColors: true,
 	})
 
@@ -250,8 +255,20 @@ func NewToolMessageItem(
 		item = NewWebSearchToolMessageItem(sty, toolCall, result, canceled)
 	case tools.TodosToolName:
 		item = NewTodosToolMessageItem(sty, toolCall, result, canceled)
+	case tools.QuestionToolName:
+		item = NewQuestionToolMessageItem(sty, toolCall, result, canceled)
 	case tools.ReferencesToolName:
 		item = NewReferencesToolMessageItem(sty, toolCall, result, canceled)
+	case tools.DefinitionToolName:
+		item = NewDefinitionToolMessageItem(sty, toolCall, result, canceled)
+	case tools.RenameToolName:
+		item = NewRenameToolMessageItem(sty, toolCall, result, canceled)
+	case tools.ReplaceSymbolToolName:
+		item = NewReplaceSymbolToolMessageItem(sty, toolCall, result, canceled)
+	case tools.CallHierarchyToolName:
+		item = NewCallHierarchyToolMessageItem(sty, toolCall, result, canceled)
+	case tools.SymbolsToolName:
+		item = NewSymbolsToolMessageItem(sty, toolCall, result, canceled)
 	case tools.LSPRestartToolName:
 		item = NewLSPRestartToolMessageItem(sty, toolCall, result, canceled)
 	default:
@@ -269,8 +286,12 @@ func NewToolMessageItem(
 
 // SetCompact implements the Compactable interface.
 func (t *baseToolMessageItem) SetCompact(compact bool) {
+	if t.isCompact == compact {
+		return
+	}
 	t.isCompact = compact
 	t.clearCache()
+	t.Bump()
 }
 
 // ID returns the unique identifier for this tool message item.
@@ -287,10 +308,22 @@ func (t *baseToolMessageItem) StartAnimation() tea.Cmd {
 }
 
 // Animate progresses the assistant message animation if it should be spinning.
+//
+// Bumps the F6 list-cache version so the next draw re-renders this
+// item: a spinner tick mutates anim's internal frame counter, which
+// changes the rendered output but is invisible to the per-item
+// caches. Without the bump the list cache would serve the previously
+// rendered frame indefinitely and the spinner would appear frozen.
+// The ID gate keeps unrelated ticks (routed here by a future change
+// to chat.Animate's dispatch) from churning the cache.
 func (t *baseToolMessageItem) Animate(msg anim.StepMsg) tea.Cmd {
 	if !t.isSpinning() {
 		return nil
 	}
+	if msg.ID != t.toolCall.ID {
+		return nil
+	}
+	t.Bump()
 	return t.anim.Animate(msg)
 }
 
@@ -313,6 +346,14 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 			IsSpinning:      t.isSpinning(),
 			Status:          t.computeStatus(),
 		})
+
+		// Prepend hook indicator if hooks ran for this tool call.
+		if t.result != nil {
+			if hookLine := toolOutputHookIndicator(t.sty, t.result.Metadata, toolItemWidth); hookLine != "" {
+				content = hookLine + "\n\n" + content
+			}
+		}
+
 		height = lipgloss.Height(content)
 		// cache the rendered content
 		t.setCachedRender(content, toolItemWidth, height)
@@ -323,19 +364,41 @@ func (t *baseToolMessageItem) RawRender(width int) string {
 
 // Render renders the tool message item at the given width.
 func (t *baseToolMessageItem) Render(width int) string {
+	// Cache the prefixed output keyed by (width, prefix variant).
+	// Bypass the cache while spinning (RawRender output is
+	// frame-dependent) or while a highlight range is active.
+	useCache := !t.isSpinning() && !t.isHighlighted()
+	var key uint64
+	switch {
+	case t.isCompact:
+		key = 2
+	case t.focused:
+		key = 1
+	default:
+		key = 0
+	}
+	if useCache {
+		if cached, ok := t.getCachedPrefixedRender(width, key); ok {
+			return cached
+		}
+	}
 	var prefix string
 	if t.isCompact {
-		prefix = t.sty.Chat.Message.ToolCallCompact.Render()
+		prefix = t.sty.Messages.ToolCallCompact.Render()
 	} else if t.focused {
-		prefix = t.sty.Chat.Message.ToolCallFocused.Render()
+		prefix = t.sty.Messages.ToolCallFocused.Render()
 	} else {
-		prefix = t.sty.Chat.Message.ToolCallBlurred.Render()
+		prefix = t.sty.Messages.ToolCallBlurred.Render()
 	}
 	lines := strings.Split(t.RawRender(width), "\n")
 	for i, ln := range lines {
 		lines[i] = prefix + ln
 	}
-	return strings.Join(lines, "\n")
+	out := strings.Join(lines, "\n")
+	if useCache {
+		t.setCachedPrefixedRender(out, width, key)
+	}
+	return out
 }
 
 // ToolCall returns the tool call associated with this message item.
@@ -347,12 +410,14 @@ func (t *baseToolMessageItem) ToolCall() message.ToolCall {
 func (t *baseToolMessageItem) SetToolCall(tc message.ToolCall) {
 	t.toolCall = tc
 	t.clearCache()
+	t.Bump()
 }
 
 // SetResult sets the tool result associated with this message item.
 func (t *baseToolMessageItem) SetResult(res *message.ToolResult) {
 	t.result = res
 	t.clearCache()
+	t.Bump()
 }
 
 // MessageID returns the ID of the message containing this tool call.
@@ -361,14 +426,20 @@ func (t *baseToolMessageItem) MessageID() string {
 }
 
 // SetMessageID sets the ID of the message containing this tool call.
+// MessageID is metadata only and does not affect the rendered output,
+// so we deliberately do not bump the version here.
 func (t *baseToolMessageItem) SetMessageID(id string) {
 	t.messageID = id
 }
 
 // SetStatus sets the tool status.
 func (t *baseToolMessageItem) SetStatus(status ToolStatus) {
+	if t.status == status {
+		return
+	}
 	t.status = status
 	t.clearCache()
+	t.Bump()
 }
 
 // Status returns the current tool status.
@@ -408,7 +479,23 @@ func (t *baseToolMessageItem) SetSpinningFunc(fn SpinningFunc) {
 func (t *baseToolMessageItem) ToggleExpanded() bool {
 	t.expandedContent = !t.expandedContent
 	t.clearCache()
+	t.Bump()
 	return t.expandedContent
+}
+
+// Finished implements list.Item. A tool call is freezable once the
+// tool call itself is marked finished AND a result has been recorded
+// (or it has been canceled). Tools that override the spinning logic
+// via spinningFunc would short-circuit live ticks; we still gate
+// freezing on isSpinning to keep the contract conservative.
+func (t *baseToolMessageItem) Finished() bool {
+	if t.isSpinning() {
+		return false
+	}
+	if t.status == ToolStatusCanceled {
+		return true
+	}
+	return t.toolCall.Finished && t.result != nil
 }
 
 // HandleMouseClick implements MouseClickable.
@@ -461,12 +548,19 @@ func toolEarlyStateContent(sty *styles.Styles, opts *ToolRenderOpts, width int) 
 	return msg, true
 }
 
-// toolErrorContent formats an error message with ERROR tag.
+// toolErrorContent formats an error message with an ERROR or WARN tag.
 func toolErrorContent(sty *styles.Styles, result *message.ToolResult, width int) string {
 	if result == nil {
 		return ""
 	}
 	errContent := strings.ReplaceAll(result.Content, "\n", " ")
+	if strings.Contains(errContent, "User denied permission") ||
+		strings.Contains(errContent, "User cancelled") {
+		deniedTag := sty.Tool.WarnTag.Render("WARN")
+		deniedTagWidth := lipgloss.Width(deniedTag)
+		errContent = ansi.Truncate(errContent, width-deniedTagWidth-3, "…")
+		return fmt.Sprintf("%s %s", deniedTag, sty.Tool.WarnMessage.Render(errContent))
+	}
 	errTag := sty.Tool.ErrorTag.Render("ERROR")
 	tagWidth := lipgloss.Width(errTag)
 	errContent = ansi.Truncate(errContent, width-tagWidth-3, "…")
@@ -488,9 +582,9 @@ func toolIcon(sty *styles.Styles, status ToolStatus) string {
 	}
 }
 
-// toolParamList formats parameters as "main (key=value, ...)" with truncation.
 // toolParamList formats tool parameters as "main (key=value, ...)" with truncation.
-func toolParamList(sty *styles.Styles, params []string, width int) string {
+// When opts.ExpandedContent is true, the output wraps instead of truncating.
+func toolParamList(sty *styles.Styles, params []string, width int, opts *ToolRenderOpts) string {
 	// minSpaceForMainParam is the min space required for the main param
 	// if this is less that the value set we will only show the main param nothing else
 	const minSpaceForMainParam = 30
@@ -517,14 +611,18 @@ func toolParamList(sty *styles.Styles, params []string, width int) string {
 		}
 	}
 
-	if width >= 0 {
+	if width >= 0 && (opts == nil || !opts.ExpandedContent) {
 		output = ansi.Truncate(output, width, "…")
+	} else if opts != nil && opts.ExpandedContent && width > 0 && lipgloss.Width(output) > width {
+		output = ansi.Hardwrap(output, width, false)
 	}
 	return sty.Tool.ParamMain.Render(output)
 }
 
 // toolHeader builds the tool header line: "● ToolName params..."
-func toolHeader(sty *styles.Styles, status ToolStatus, name string, width int, nested bool, params ...string) string {
+// When opts.ExpandedContent is true, long parameters wrap instead of truncating.
+func toolHeader(sty *styles.Styles, status ToolStatus, name string, width int, opts *ToolRenderOpts, params ...string) string {
+	nested := opts != nil && opts.Compact
 	icon := toolIcon(sty, status)
 	nameStyle := sty.Tool.NameNormal
 	if nested {
@@ -534,13 +632,26 @@ func toolHeader(sty *styles.Styles, status ToolStatus, name string, width int, n
 	prefix := fmt.Sprintf("%s %s ", icon, toolName)
 	prefixWidth := lipgloss.Width(prefix)
 	remainingWidth := width - prefixWidth
-	paramsStr := toolParamList(sty, params, remainingWidth)
+	paramsStr := toolParamList(sty, params, remainingWidth, opts)
+
+	// When expanded, toolParamList may return multiple lines. Indent
+	// continuation lines to align with the first line's param text.
+	if strings.Contains(paramsStr, "\n") {
+		lines := strings.Split(paramsStr, "\n")
+		indent := strings.Repeat(" ", prefixWidth)
+		for i := 1; i < len(lines); i++ {
+			lines[i] = indent + lines[i]
+		}
+		return prefix + strings.Join(lines, "\n")
+	}
 	return prefix + paramsStr
 }
 
 // toolOutputPlainContent renders plain text with optional expansion support.
 func toolOutputPlainContent(sty *styles.Styles, content string, width int, expanded bool) string {
 	content = stringext.NormalizeSpace(content)
+	content = common.StripCursorControl(content)
+	content = common.RemapANSI16(content, sty.ANSI)
 	lines := strings.Split(content, "\n")
 
 	maxLines := responseContextHeight
@@ -615,9 +726,10 @@ func toolOutputCodeContent(sty *styles.Styles, path, content string, offset, wid
 
 	// Add truncation message if needed.
 	if len(lines) > maxLines && !expanded {
-		out = append(out, sty.Tool.ContentCodeTruncation.
-			Width(width).
-			Render(fmt.Sprintf(assistantMessageTruncateFormat, len(lines)-maxLines)),
+		out = append(
+			out, sty.Tool.ContentCodeTruncation.
+				Width(width).
+				Render(fmt.Sprintf(assistantMessageTruncateFormat, len(lines)-maxLines)),
 		)
 	}
 
@@ -647,6 +759,172 @@ func toolOutputSkillContent(sty *styles.Styles, name, description string) string
 		sty.Tool.ResourceName.Render(name),
 		sty.Tool.ResourceSize.Render(description),
 	))
+}
+
+// toolOutputHookIndicator renders hook indicator lines from tool metadata.
+// Returns empty string if no hook metadata is present. Hook names are
+// sanitized (newlines replaced with ¶) and truncated to fit the available
+// horizontal space.
+func toolOutputHookIndicator(sty *styles.Styles, metadata string, width int) string {
+	if metadata == "" {
+		return ""
+	}
+	var meta struct {
+		Hook *hooks.HookMetadata `json:"hook"`
+	}
+	if err := json.Unmarshal([]byte(metadata), &meta); err != nil || meta.Hook == nil {
+		return ""
+	}
+	h := meta.Hook
+	if len(h.Hooks) == 0 {
+		return ""
+	}
+
+	// Sanitize names (replace newlines with ¶) and compute max widths
+	// for the name, matcher, and detail columns so they align. The name
+	// column is capped at maxHookNameWidth characters.
+	const maxHookNameWidth = 30
+	sanitizedNames := make([]string, len(h.Hooks))
+	details := make([]string, len(h.Hooks))
+	maxNameWidth := 0
+	maxMatcherWidth := 0
+	maxDetailWidth := 0
+	for i, hi := range h.Hooks {
+		sanitizedNames[i] = strings.ReplaceAll(hi.Name, "\n", "¶")
+		w := lipgloss.Width(sty.Tool.HookName.Render(sanitizedNames[i]))
+		if w > maxNameWidth {
+			maxNameWidth = w
+		}
+		if hi.Matcher != "" {
+			mw := lipgloss.Width(sty.Tool.HookMatcher.Render(hi.Matcher))
+			if mw > maxMatcherWidth {
+				maxMatcherWidth = mw
+			}
+		}
+		details[i] = hookDetail(sty, hi)
+		if dw := lipgloss.Width(details[i]); dw > maxDetailWidth {
+			maxDetailWidth = dw
+		}
+	}
+
+	if maxNameWidth > maxHookNameWidth {
+		maxNameWidth = maxHookNameWidth
+	}
+
+	// Cap the name column so the widest line still fits in width. The
+	// per-line layout is:
+	//   "Hook " + name(padded) + [" " + matcher(padded)] + " → " + detail
+	if width > 0 {
+		fixed := lipgloss.Width(sty.Tool.HookLabel.Render("Hook")) + 1
+		if maxMatcherWidth > 0 {
+			fixed += 1 + maxMatcherWidth
+		}
+		fixed += 1 + lipgloss.Width(sty.Tool.HookArrow.Render(styles.ArrowRightIcon)) + 1
+		fixed += maxDetailWidth
+		if budget := width - fixed; budget < maxNameWidth {
+			maxNameWidth = max(1, budget)
+		}
+	}
+
+	var lines []string
+	for i, hi := range h.Hooks {
+		name := truncateHookName(sanitizedNames[i], maxNameWidth)
+		lines = append(lines, renderHookLine(sty, hi, name, details[i], maxNameWidth, maxMatcherWidth))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// truncateHookName truncates a hook name to fit within maxWidth cells,
+// using left-truncation for absolute paths (e.g. `…/format.sh`) and
+// right-truncation for everything else. Left-truncation is only applied
+// when the name looks unambiguously like a path: absolute, single-line,
+// and contains no spaces.
+func truncateHookName(name string, maxWidth int) string {
+	if ansi.StringWidth(name) <= maxWidth {
+		return name
+	}
+	if isLikelyPath(name) {
+		// ansi.TruncateLeft removes n graphemes from the start; pick n
+		// so the result plus the "…" prefix fits in maxWidth.
+		n := ansi.StringWidth(name) - maxWidth + 1
+		return ansi.TruncateLeft(name, n, "…")
+	}
+	return ansi.Truncate(name, maxWidth, "…")
+}
+
+// isLikelyPath reports whether s looks unambiguously like a filesystem
+// path, suitable for left-truncation. We accept absolute paths and
+// relative paths that contain a separator and no shell-ish characters.
+func isLikelyPath(s string) bool {
+	if s == "" || strings.ContainsAny(s, " \t\n¶'\"|&;<>$`*?(){}[]\\") {
+		return false
+	}
+	if filepath.IsAbs(s) {
+		return true
+	}
+	return strings.Contains(s, "/")
+}
+
+// renderHookLine renders a single hook indicator line with aligned columns.
+func renderHookLine(sty *styles.Styles, hi hooks.HookInfo, rawName, detail string, maxNameWidth, maxMatcherWidth int) string {
+	name := sty.Tool.HookName.Render(rawName)
+	namePad := strings.Repeat(" ", max(0, maxNameWidth-lipgloss.Width(name)))
+
+	var matcherPart string
+	if maxMatcherWidth > 0 {
+		if hi.Matcher != "" {
+			matcher := sty.Tool.HookMatcher.Render(hi.Matcher)
+			matcherPad := strings.Repeat(" ", maxMatcherWidth-lipgloss.Width(matcher))
+			matcherPart = " " + matcher + matcherPad
+		} else {
+			matcherPart = " " + strings.Repeat(" ", maxMatcherWidth)
+		}
+	}
+
+	labelStyle := sty.Tool.HookLabel
+	arrowStyle := sty.Tool.HookArrow
+	if hi.Decision == "deny" {
+		labelStyle = sty.Tool.HookDeniedLabel
+		arrowStyle = sty.Tool.HookDeniedLabel
+	}
+
+	return fmt.Sprintf(
+		"%s %s%s%s %s %s",
+		labelStyle.Render("Hook"),
+		name,
+		namePad,
+		matcherPart,
+		arrowStyle.Render(styles.ArrowRightIcon),
+		detail,
+	)
+}
+
+// hookDetail returns the styled detail text for a single hook result.
+func hookDetail(sty *styles.Styles, hi hooks.HookInfo) string {
+	const (
+		okMessage      = "OK"
+		denialMessage  = "Denied"
+		rewroteMessage = "Rewrote Output"
+	)
+	switch hi.Decision {
+	case "deny":
+		if hi.Reason != "" {
+			return sty.Tool.HookDenied.Render(denialMessage) + " " + sty.Tool.HookDeniedReason.Render(hi.Reason)
+		}
+		return sty.Tool.HookDenied.Render(denialMessage)
+	case "allow":
+		result := sty.Tool.HookOK.Render(okMessage)
+		if hi.InputRewrite {
+			result += " " + sty.Tool.HookRewrote.Render(rewroteMessage)
+		}
+		return result
+	default:
+		result := sty.Tool.HookOK.Render(okMessage)
+		if hi.InputRewrite {
+			result += " " + sty.Tool.HookRewrote.Render(rewroteMessage)
+		}
+		return result
+	}
 }
 
 // getDigits returns the number of digits in a number.
@@ -799,8 +1077,11 @@ func toolOutputMarkdownContent(sty *styles.Styles, content string, width int, ex
 		width = maxTextWidth
 	}
 
-	renderer := common.PlainMarkdownRenderer(sty, width)
+	renderer := common.QuietMarkdownRenderer(sty, width)
+	mu := common.LockMarkdownRenderer(renderer)
+	mu.Lock()
 	rendered, err := renderer.Render(content)
+	mu.Unlock()
 	if err != nil {
 		return toolOutputPlainContent(sty, content, width, expanded)
 	}
@@ -820,9 +1101,10 @@ func toolOutputMarkdownContent(sty *styles.Styles, content string, width int, ex
 	}
 
 	if len(lines) > maxLines && !expanded {
-		out = append(out, sty.Tool.ContentTruncation.
-			Width(width).
-			Render(fmt.Sprintf(assistantMessageTruncateFormat, len(lines)-maxLines)),
+		out = append(
+			out, sty.Tool.ContentTruncation.
+				Width(width).
+				Render(fmt.Sprintf(assistantMessageTruncateFormat, len(lines)-maxLines)),
 		)
 	}
 

@@ -17,6 +17,7 @@ import (
 	"os"
 
 	"github.com/abrekhov/crush/internal/cmd"
+	_ "github.com/abrekhov/crush/internal/dns"
 	_ "github.com/joho/godotenv/autoload"
 )
 

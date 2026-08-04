@@ -152,6 +152,31 @@ OAuth details (implementation in `internal/oauth/anthropic/pkce.go`):
 Tokens are stored in `~/.config/crush/config.json` under `providers.anthropic.oauth`.
 The access token auto-refreshes via `providers.anthropic.oauth.refresh_token`.
 
+Paste the whole `code` value from the redirect URL — it looks like `<code>#<state>`,
+and `ExchangeCode` splits the fragment off itself.
+
+**What makes subscription inference work** (`ProviderConfig.SetupAnthropicOAuth` in
+`internal/config/config.go`) — all three are required, drop one and the API 401s:
+
+1. **`Authorization: Bearer <token>`, not `x-api-key`.** Subscription tokens are
+   rejected as an API key. Setup rewrites `APIKey` to `"Bearer " + token`;
+   `buildAnthropicProvider` (`internal/agent/coordinator.go`) keys off that exact
+   prefix to send an `Authorization` header and clear `ANTHROPIC_API_KEY`.
+2. **`anthropic-beta: oauth-2025-04-20`** — added via `ExtraHeaders`.
+3. **Claude Code identity as the first system block.** The subscription endpoint is
+   scoped to Claude Code and rejects requests that do not lead with
+   `You are Claude Code, Anthropic's official CLI for Claude.` Setup puts it at the
+   front of `SystemPromptPrefix`, which the agent prepends as a leading system
+   message; a user-configured prefix is preserved after it.
+
+`SetupAnthropicOAuth` is idempotent — config reloads re-run it over an
+already-prepared provider. It runs on login, on config load, and after a 401
+refresh, so the three properties survive a token rotation.
+
+Note: upstream **removed** Claude Code subscription support (it deletes the
+`providers.anthropic` config to force onboarding). This fork restores it, so expect
+that hunk to conflict on every upstream merge.
+
 ### GitHub Copilot
 
 ```bash

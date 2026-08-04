@@ -8,16 +8,18 @@ import (
 	mcptools "github.com/abrekhov/crush/internal/agent/tools/mcp"
 	"github.com/abrekhov/crush/internal/app"
 	"github.com/abrekhov/crush/internal/config"
+	"github.com/abrekhov/crush/internal/pubsub"
 )
 
-// SubscribeEvents returns the event channel for a workspace's app.
-func (b *Backend) SubscribeEvents(workspaceID string) (<-chan tea.Msg, error) {
+// SubscribeEvents returns a per-caller event channel for a workspace.
+// Each caller receives all events; multiple callers do not compete.
+func (b *Backend) SubscribeEvents(ctx context.Context, workspaceID string) (<-chan pubsub.Event[tea.Msg], error) {
 	ws, err := b.GetWorkspace(workspaceID)
 	if err != nil {
 		return nil, err
 	}
 
-	return ws.Events(), nil
+	return ws.Events(ctx), nil
 }
 
 // GetLSPStates returns the state of all LSP clients.
@@ -104,4 +106,40 @@ func (b *Backend) MCPRefreshPrompts(ctx context.Context, _ string, name string) 
 // MCPRefreshResources refreshes resources for a named MCP client.
 func (b *Backend) MCPRefreshResources(ctx context.Context, _ string, name string) {
 	mcptools.RefreshResources(ctx, name)
+}
+
+// MCPPendingAuth returns the MCP servers awaiting OAuth authentication,
+// for clients that need to prompt the user. workspaceID selects the
+// workspace whose config provides the server URLs.
+func (b *Backend) MCPPendingAuth(workspaceID string) ([]mcptools.PendingAuthServer, error) {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	return mcptools.PendingAuthMCPs(ws.Cfg), nil
+}
+
+// MCPAuthURL returns the current OAuth authorization URL for a named
+// server, if a flow is in progress.
+func (b *Backend) MCPAuthURL(name string) string {
+	return mcptools.MCPAuthURL(name)
+}
+
+// MCPAuthenticate runs the OAuth flow for a named MCP server with the
+// local browser suppressed: the authorization URL is exposed via
+// MCPAuthURL/MCPPendingAuth for the calling client to open on the user's
+// machine. The call blocks until the flow completes, fails, or ctx is
+// cancelled. workspaceID selects the workspace whose config drives the
+// flow.
+func (b *Backend) MCPAuthenticate(ctx context.Context, workspaceID, name string) error {
+	ws, err := b.GetWorkspace(workspaceID)
+	if err != nil {
+		return err
+	}
+	finish, cancel, err := mcptools.BeginAuth(ws.Cfg, name)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	return finish(ctx)
 }

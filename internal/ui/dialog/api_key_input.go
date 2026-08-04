@@ -70,20 +70,17 @@ func NewAPIKeyInput(
 	m.provider = provider
 	m.model = model
 	m.modelType = modelType
-	m.width = 60
-
-	innerWidth := m.width - t.Dialog.View.GetHorizontalFrameSize() - 2
+	m.width = 0 // Set dynamically in Draw().
 
 	m.input = textinput.New()
 	m.input.SetVirtualCursor(false)
 	m.input.Placeholder = "Enter your API key..."
 	m.input.SetStyles(com.Styles.TextInput)
 	m.input.Focus()
-	m.input.SetWidth(max(0, innerWidth-t.Dialog.InputPrompt.GetHorizontalFrameSize()-1)) // (1) cursor padding
 
 	m.spinner = spinner.New(
 		spinner.WithSpinner(spinner.Dot),
-		spinner.WithStyle(t.Base.Foreground(t.Green)),
+		spinner.WithStyle(t.Dialog.APIKey.Spinner),
 	)
 
 	m.help = help.New()
@@ -161,11 +158,14 @@ func (m *APIKeyInput) HandleMsg(msg tea.Msg) Action {
 func (m *APIKeyInput) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 	t := m.com.Styles
 
+	m.width = max(0, min(60, area.Dx()-t.Dialog.View.GetHorizontalBorderSize()))
+	innerWidth := m.width - t.Dialog.View.GetHorizontalFrameSize() - 2
+	m.input.SetWidth(max(0, innerWidth-t.Dialog.InputPrompt.GetHorizontalFrameSize()-1)) // (1) cursor padding
+
 	textStyle := t.Dialog.SecondaryText
-	helpStyle := t.Dialog.HelpView
 	dialogStyle := t.Dialog.View.Width(m.width)
 	inputStyle := t.Dialog.InputPrompt
-	helpStyle = helpStyle.Width(m.width - dialogStyle.GetHorizontalFrameSize())
+	helpView := renderDialogHelp(t, &m.help, m, m.width-dialogStyle.GetHorizontalFrameSize())
 
 	m.input.Prompt = m.spinner.View()
 
@@ -175,7 +175,7 @@ func (m *APIKeyInput) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 		textStyle.Render("This will be written in your global configuration:"),
 		textStyle.Render(config.GlobalConfigData()),
 		"",
-		helpStyle.Render(m.help.View(m)),
+		helpView,
 	}, "\n")
 
 	cur := m.Cursor()
@@ -202,7 +202,7 @@ func (m *APIKeyInput) headerView() string {
 		return textStyle.Render(m.dialogTitle())
 	}
 	headerOffset := titleStyle.GetHorizontalFrameSize() + dialogStyle.GetHorizontalFrameSize()
-	return common.DialogTitle(t, titleStyle.Render(m.dialogTitle()), m.width-headerOffset, m.com.Styles.Primary, m.com.Styles.Secondary)
+	return common.DialogTitle(t, titleStyle.Render(m.dialogTitle()), m.width-headerOffset, m.com.Styles.Dialog.TitleGradFromColor, m.com.Styles.Dialog.TitleGradToColor)
 }
 
 func (m *APIKeyInput) dialogTitle() string {

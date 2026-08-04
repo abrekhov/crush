@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/abrekhov/crush/internal/oauth"
@@ -28,6 +29,12 @@ const (
 
 	// OAuthBetaHeader is the required beta header for API calls using OAuth tokens.
 	OAuthBetaHeader = "oauth-2025-04-20"
+
+	// ClaudeCodeIdentity must be the first system block of every request
+	// authenticated with a claude.ai subscription token. The subscription
+	// inference endpoint is scoped to Claude Code and rejects requests that
+	// do not lead with this exact line.
+	ClaudeCodeIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
 )
 
 // These vars are package-level so tests can override them.
@@ -101,13 +108,21 @@ type tokenResponse struct {
 }
 
 // ExchangeCode exchanges an authorization code (from the redirect URL) for tokens.
+//
+// The callback page renders the code as "<code>#<state>", and that is what
+// users copy out of the address bar, so the fragment is split off here and
+// the state is forwarded along with the exchange.
 func ExchangeCode(ctx context.Context, code, verifier string) (*oauth.Token, error) {
+	code, state, _ := strings.Cut(code, "#")
 	data := url.Values{
 		"grant_type":    {"authorization_code"},
 		"client_id":     {ClientID},
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
 		"code_verifier": {verifier},
+	}
+	if state != "" {
+		data.Set("state", state)
 	}
 	return postToken(ctx, data)
 }

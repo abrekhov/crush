@@ -173,7 +173,7 @@ func (d *DockerMCPToolRenderContext) renderMCPServers(sty *styles.Styles, opts *
 	}
 
 	if len(result.Servers) == 0 {
-		return sty.Subtle.Render("No MCP servers found.")
+		return sty.Tool.ResultEmpty.Render("No MCP servers found.")
 	}
 
 	bodyWidth := min(120, width) - toolBodyLeftPaddingTotal
@@ -181,10 +181,10 @@ func (d *DockerMCPToolRenderContext) renderMCPServers(sty *styles.Styles, opts *
 	moreServers := ""
 	for i, server := range result.Servers {
 		if i > 9 {
-			moreServers = sty.Subtle.Render(fmt.Sprintf("... and %d more", len(result.Servers)-10))
+			moreServers = sty.Tool.ResultTruncation.Render(fmt.Sprintf("... and %d more", len(result.Servers)-10))
 			break
 		}
-		rows = append(rows, []string{sty.Base.Render(server.Name), sty.Subtle.Render(server.Description)})
+		rows = append(rows, []string{sty.Tool.ResultItemName.Render(server.Name), sty.Tool.ResultItemDesc.Render(server.Description)})
 	}
 	serverTable := table.New().
 		Wrap(false).
@@ -220,7 +220,7 @@ func (d *DockerMCPToolRenderContext) makeHeader(sty *styles.Styles, tool string,
 		icon = sty.Tool.IconPending.Render()
 	}
 	prefix := fmt.Sprintf("%s %s ", icon, d.formatToolName(sty, tool))
-	return prefix + toolParamList(sty, params, width-lipgloss.Width(prefix))
+	return prefix + toolParamList(sty, params, width-lipgloss.Width(prefix), opts)
 }
 
 func (d *DockerMCPToolRenderContext) formatToolName(sty *styles.Styles, tool string) string {
@@ -236,10 +236,10 @@ func (d *DockerMCPToolRenderContext) formatToolName(sty *styles.Styles, tool str
 		action = "Find"
 	case "mcp-add":
 		action = "Add"
-		actionStyle = sty.Tool.DockerMCPActionAdd
+		actionStyle = sty.Tool.ActionCreate
 	case "mcp-remove":
 		action = "Remove"
-		actionStyle = sty.Tool.DockerMCPActionDel
+		actionStyle = sty.Tool.ActionDestroy
 	case "code-mode":
 		action = "Code Mode"
 	default:
@@ -274,7 +274,7 @@ func (d *DockerMCPToolRenderContext) makeCompactHeader(sty *styles.Styles, tool 
 	}
 
 	name := fmt.Sprintf("Docker MCP: %s", action)
-	return toolHeader(sty, ToolStatusSuccess, name, width, true, params...)
+	return toolHeader(sty, ToolStatusSuccess, name, width, &ToolRenderOpts{Compact: true}, params...)
 }
 
 // IsDockerMCPTool returns true if the tool name is a Docker MCP tool.

@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"bufio"
-	"cmp"
 	"context"
 	"fmt"
 	"os"
@@ -10,15 +9,13 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/atotto/clipboard"
-	hyperp "github.com/abrekhov/crush/internal/agent/hyper"
-	"github.com/abrekhov/crush/internal/client"
+	"github.com/abrekhov/crush/internal/clipboard"
 	"github.com/abrekhov/crush/internal/config"
 	"github.com/abrekhov/crush/internal/oauth"
 	anthropicauth "github.com/abrekhov/crush/internal/oauth/anthropic"
 	"github.com/abrekhov/crush/internal/oauth/copilot"
 	"github.com/abrekhov/crush/internal/oauth/hyper"
-	"github.com/charmbracelet/x/ansi"
+	"github.com/abrekhov/crush/internal/workspace"
 	"github.com/pkg/browser"
 	"github.com/spf13/cobra"
 )
@@ -31,14 +28,17 @@ var loginCmd = &cobra.Command{
 The platform should be provided as an argument.
 Available platforms are: anthropic, hyper, copilot.`,
 	Example: `
-# Authenticate with claude.ai (Pro/Max subscription)
-crush login anthropic
-
 # Authenticate with Charm Hyper
 crush login
 
+# Authenticate with a claude.ai Pro/Max subscription
+crush login anthropic
+
 # Authenticate with GitHub Copilot
 crush login copilot
+
+# Force re-authentication even if already logged in
+crush login -f copilot
   `,
 	ValidArgs: []cobra.Completion{
 		"anthropic",
@@ -50,36 +50,48 @@ crush login copilot
 	},
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		c, ws, cleanup, err := connectToServer(cmd)
+		ws, cleanup, err := setupWorkspaceWithProgressBar(cmd)
 		if err != nil {
 			return err
 		}
 		defer cleanup()
 
-		progressEnabled := ws.Config.Options.Progress == nil || *ws.Config.Options.Progress
-		if progressEnabled && supportsProgressBar() {
-			_, _ = fmt.Fprintf(os.Stderr, ansi.SetIndeterminateProgressBar)
-			defer func() { _, _ = fmt.Fprintf(os.Stderr, ansi.ResetProgressBar) }()
-		}
-
 		provider := "hyper"
 		if len(args) > 0 {
 			provider = args[0]
 		}
+		force, _ := cmd.Flags().GetBool("force")
 		switch provider {
 		case "anthropic", "claude":
-			return loginAnthropic(cmd.Context(), c, ws.ID)
+			return loginAnthropic(ws, force)
 		case "hyper":
-			return loginHyper(c, ws.ID)
+			return loginHyper(ws, force)
 		case "copilot", "github", "github-copilot":
-			return loginCopilot(cmd.Context(), c, ws.ID)
+			return loginCopilot(ws, force)
 		default:
 			return fmt.Errorf("unknown platform: %s", args[0])
 		}
 	},
 }
 
-func loginAnthropic(ctx context.Context, c *client.Client, wsID string) error {
+func init() {
+	loginCmd.Flags().BoolP("force", "f", false, "Force re-authentication even if already logged in")
+}
+
+func loginAnthropic(ws workspace.Workspace, force bool) error {
+	ctx := getLoginContext()
+
+	if !force {
+		cfg := ws.Config()
+		if cfg != nil {
+			if pc, ok := cfg.Providers.Get("anthropic"); ok && pc.OAuthToken != nil {
+				fmt.Println("You are already logged in to claude.ai.")
+				fmt.Println("Use --force to re-authenticate.")
+				return nil
+			}
+		}
+	}
+
 	authReq, err := anthropicauth.NewAuthRequest()
 	if err != nil {
 		return fmt.Errorf("prepare authorization request: %w", err)
@@ -87,7 +99,7 @@ func loginAnthropic(ctx context.Context, c *client.Client, wsID string) error {
 
 	fmt.Println("Open the following URL in your browser to log in with your claude.ai account:")
 	fmt.Println()
-	fmt.Println(lipgloss.NewStyle().Hyperlink(authReq.URL, "id=anthropic").Render(authReq.URL))
+	lipgloss.Println(lipgloss.NewStyle().Hyperlink(authReq.URL, "id=anthropic").Render(authReq.URL))
 	fmt.Println()
 	fmt.Println("After authorizing, you will be redirected to a page at console.anthropic.com.")
 	fmt.Println("Copy the 'code' parameter value from the URL in your browser's address bar,")
@@ -112,10 +124,7 @@ func loginAnthropic(ctx context.Context, c *client.Client, wsID string) error {
 		return fmt.Errorf("token exchange failed: %w", err)
 	}
 
-	if err := cmp.Or(
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers.anthropic.api_key", token.AccessToken),
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers.anthropic.oauth", token),
-	); err != nil {
+	if err := ws.SetProviderAPIKey(config.ScopeGlobal, "anthropic", token); err != nil {
 		return err
 	}
 
@@ -124,29 +133,34 @@ func loginAnthropic(ctx context.Context, c *client.Client, wsID string) error {
 	return nil
 }
 
-func loginHyper(c *client.Client, wsID string) error {
-	if !hyperp.Enabled() {
-		return fmt.Errorf("hyper not enabled")
-	}
+func loginHyper(ws workspace.Workspace, force bool) error {
 	ctx := getLoginContext()
+
+	if !force {
+		cfg := ws.Config()
+		if cfg != nil {
+			if pc, ok := cfg.Providers.Get("hyper"); ok && pc.OAuthToken != nil {
+				fmt.Println("You are already logged in to Hyper.")
+				fmt.Println("Use --force to re-authenticate.")
+				return nil
+			}
+		}
+	}
 
 	resp, err := hyper.InitiateDeviceAuth(ctx)
 	if err != nil {
 		return err
 	}
 
-	if clipboard.WriteAll(resp.UserCode) == nil {
-		fmt.Println("The following code should be on clipboard already:")
-	} else {
-		fmt.Println("Copy the following code:")
-	}
+	clipboard.WriteText(resp.UserCode)
+	fmt.Println("The following code should be on clipboard already:")
 
 	fmt.Println()
-	fmt.Println(lipgloss.NewStyle().Bold(true).Render(resp.UserCode))
+	lipgloss.Println(lipgloss.NewStyle().Bold(true).Render(resp.UserCode))
 	fmt.Println()
 	fmt.Println("Press enter to open this URL, and then paste it there:")
 	fmt.Println()
-	fmt.Println(lipgloss.NewStyle().Hyperlink(resp.VerificationURL, "id=hyper").Render(resp.VerificationURL))
+	lipgloss.Println(lipgloss.NewStyle().Hyperlink(resp.VerificationURL, "id=hyper").Render(resp.VerificationURL))
 	fmt.Println()
 	waitEnter()
 	if err := browser.OpenURL(resp.VerificationURL); err != nil {
@@ -174,10 +188,7 @@ func loginHyper(c *client.Client, wsID string) error {
 		return fmt.Errorf("access token is not active")
 	}
 
-	if err := cmp.Or(
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers.hyper.api_key", token.AccessToken),
-		c.SetConfigField(ctx, wsID, config.ScopeGlobal, "providers.hyper.oauth", token),
-	); err != nil {
+	if err := ws.SetProviderAPIKey(config.ScopeGlobal, "hyper", token); err != nil {
 		return err
 	}
 
@@ -186,14 +197,17 @@ func loginHyper(c *client.Client, wsID string) error {
 	return nil
 }
 
-func loginCopilot(ctx context.Context, c *client.Client, wsID string) error {
+func loginCopilot(ws workspace.Workspace, force bool) error {
 	loginCtx := getLoginContext()
 
-	cfg, err := c.GetConfig(ctx, wsID)
-	if err == nil && cfg != nil {
-		if pc, ok := cfg.Providers.Get("copilot"); ok && pc.OAuthToken != nil {
-			fmt.Println("You are already logged in to GitHub Copilot.")
-			return nil
+	if !force {
+		cfg := ws.Config()
+		if cfg != nil {
+			if pc, ok := cfg.Providers.Get("copilot"); ok && pc.OAuthToken != nil {
+				fmt.Println("You are already logged in to GitHub Copilot.")
+				fmt.Println("Use --force to re-authenticate.")
+				return nil
+			}
 		}
 	}
 
@@ -216,13 +230,21 @@ func loginCopilot(ctx context.Context, c *client.Client, wsID string) error {
 			return err
 		}
 
+		clipboard.WriteText(dc.UserCode)
 		fmt.Println()
-		fmt.Println("Open the following URL and follow the instructions to authenticate with GitHub Copilot:")
+		fmt.Println("The following code should be on clipboard already:")
 		fmt.Println()
-		fmt.Println(lipgloss.NewStyle().Hyperlink(dc.VerificationURI, "id=copilot").Render(dc.VerificationURI))
+		lipgloss.Println(lipgloss.NewStyle().Bold(true).Render(dc.UserCode))
 		fmt.Println()
-		fmt.Println("Code:", lipgloss.NewStyle().Bold(true).Render(dc.UserCode))
+		fmt.Println("Press enter to open this URL and authenticate with GitHub Copilot:")
 		fmt.Println()
+		lipgloss.Println(lipgloss.NewStyle().Hyperlink(dc.VerificationURI, "id=copilot").Render(dc.VerificationURI))
+		fmt.Println()
+		waitEnter()
+		if err := browser.OpenURL(dc.VerificationURI); err != nil {
+			fmt.Println("Could not open the URL. You'll need to manually open the URL in your browser.")
+		}
+
 		fmt.Println("Waiting for authorization...")
 
 		t, err := copilot.PollForToken(loginCtx, dc)
@@ -230,11 +252,11 @@ func loginCopilot(ctx context.Context, c *client.Client, wsID string) error {
 			fmt.Println()
 			fmt.Println("GitHub Copilot is unavailable for this account. To signup, go to the following page:")
 			fmt.Println()
-			fmt.Println(lipgloss.NewStyle().Hyperlink(copilot.SignupURL, "id=copilot-signup").Render(copilot.SignupURL))
+			lipgloss.Println(lipgloss.NewStyle().Hyperlink(copilot.SignupURL, "id=copilot-signup").Render(copilot.SignupURL))
 			fmt.Println()
 			fmt.Println("You may be able to request free access if eligible. For more information, see:")
 			fmt.Println()
-			fmt.Println(lipgloss.NewStyle().Hyperlink(copilot.FreeURL, "id=copilot-free").Render(copilot.FreeURL))
+			lipgloss.Println(lipgloss.NewStyle().Hyperlink(copilot.FreeURL, "id=copilot-free").Render(copilot.FreeURL))
 		}
 		if err != nil {
 			return err
@@ -242,10 +264,7 @@ func loginCopilot(ctx context.Context, c *client.Client, wsID string) error {
 		token = t
 	}
 
-	if err := cmp.Or(
-		c.SetConfigField(loginCtx, wsID, config.ScopeGlobal, "providers.copilot.api_key", token.AccessToken),
-		c.SetConfigField(loginCtx, wsID, config.ScopeGlobal, "providers.copilot.oauth", token),
-	); err != nil {
+	if err := ws.SetProviderAPIKey(config.ScopeGlobal, "copilot", token); err != nil {
 		return err
 	}
 

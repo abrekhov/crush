@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"maps"
 	"net/http"
 	"net/url"
@@ -15,7 +14,6 @@ import (
 
 	"charm.land/catwalk/pkg/catwalk"
 	"github.com/abrekhov/crush/internal/csync"
-	"github.com/abrekhov/crush/internal/env"
 	"github.com/abrekhov/crush/internal/oauth"
 	anthropicauth "github.com/abrekhov/crush/internal/oauth/anthropic"
 	"github.com/abrekhov/crush/internal/oauth/copilot"
@@ -98,7 +96,7 @@ type ProviderConfig struct {
 	// The provider's API endpoint.
 	BaseURL string `json:"base_url,omitempty" jsonschema:"description=Base URL for the provider's API,format=uri,example=https://api.openai.com/v1"`
 	// The provider type, e.g. "openai", "anthropic", etc. if empty it defaults to openai.
-	Type catwalk.Type `json:"type,omitempty" jsonschema:"description=Provider type that determines the API format,enum=openai,enum=openai-compat,enum=anthropic,enum=gemini,enum=azure,enum=vertexai,default=openai"`
+	Type catwalk.Type `json:"type,omitempty" jsonschema:"description=Provider type that determines the API format,default=openai"`
 	// The provider's API key.
 	APIKey string `json:"api_key,omitempty" jsonschema:"description=API key for authentication with the provider,example=$OPENAI_API_KEY"`
 	// The original API key template before resolution (for re-resolution on auth errors).
@@ -111,15 +109,41 @@ type ProviderConfig struct {
 	// Custom system prompt prefix.
 	SystemPromptPrefix string `json:"system_prompt_prefix,omitempty" jsonschema:"description=Custom prefix to add to system prompts for this provider"`
 
-	// Extra headers to send with each request to the provider.
+	// Extra headers to send with each request to the provider. Values
+	// run through shell expansion at config-load time, so $VAR and
+	// $(cmd) work the same way they do in MCP headers. A header whose
+	// value resolves to the empty string (unset bare $VAR under
+	// lenient nounset, $(echo), or literal "") is omitted from the
+	// outgoing request rather than sent as "Header:".
 	ExtraHeaders map[string]string `json:"extra_headers,omitempty" jsonschema:"description=Additional HTTP headers to send with requests"`
-	// Extra body
-	ExtraBody map[string]any `json:"extra_body,omitempty" jsonschema:"description=Additional fields to include in request bodies, only works with openai-compatible providers"`
+	// ExtraBody is merged verbatim into OpenAI-compatible request
+	// bodies. String values are NOT shell-expanded: this is a plain
+	// JSON passthrough so that arbitrary provider-extension fields
+	// (numbers, nested objects, booleans) round-trip without a
+	// recursive walker guessing at intent. If you need an env-var-
+	// driven value at request time, put it in extra_headers, or in
+	// the provider's top-level api_key / base_url, all of which do
+	// expand.
+	ExtraBody map[string]any `json:"extra_body,omitempty" jsonschema:"description=Additional fields to include in request bodies\\, only works with openai-compatible providers"`
 
 	ProviderOptions map[string]any `json:"provider_options,omitempty" jsonschema:"description=Additional provider-specific options for this provider"`
 
 	// Used to pass extra parameters to the provider.
 	ExtraParams map[string]string `json:"-"`
+
+	// AWSAuthRefresh is a shell command run when Bedrock returns a
+	// credential error. Output is discarded to avoid corrupting the TUI.
+	AWSAuthRefresh string `json:"aws_auth_refresh,omitempty" jsonschema:"description=Shell command to run when AWS credentials expire (Bedrock only)."`
+
+	// Skip cost accumulation for this provider when using subscription or flat rate billing.
+	FlatRate bool `json:"flat_rate,omitempty" jsonschema:"description=Flat-rate mode for this provider"`
+
+	// AutoDiscoverModels controls model discovery via /v1/models endpoint.
+	// When Models is empty and this is nil or true, Crush auto-discovers
+	// models. When true and Models is non-empty, discovered models are
+	// merged in (user-specified models take precedence). When false,
+	// only explicitly listed models are used.
+	AutoDiscoverModels *bool `json:"discover_models,omitempty" jsonschema:"description=Auto-discover models from /v1/models endpoint. When true with existing models they are merged (yours win),default=true"`
 
 	// The provider models
 	Models []catwalk.Model `json:"models,omitempty" jsonschema:"description=List of models available from this provider"`
@@ -159,10 +183,31 @@ func (c *ProviderConfig) SetupGitHubCopilot() {
 	maps.Copy(c.ExtraHeaders, copilot.Headers())
 }
 
-// SetupAnthropicOAuth configures the provider to use an OAuth access token
-// instead of a plain API key by adding the required beta header.
+// SetupAnthropicOAuth configures the provider to authenticate with a
+// claude.ai subscription OAuth access token rather than a plain API key.
+//
+// Subscription tokens are rejected when presented as an x-api-key, so the
+// key is rewritten into the "Bearer <token>" form that
+// buildAnthropicProvider recognises and forwards as an Authorization
+// header. The oauth beta header is required alongside it.
 func (c *ProviderConfig) SetupAnthropicOAuth() {
+	if c.ExtraHeaders == nil {
+		c.ExtraHeaders = make(map[string]string)
+	}
 	maps.Copy(c.ExtraHeaders, anthropicauth.Headers())
+	// Idempotent: the stored api_key is the raw token, but this may run
+	// again over an already-prepared config after a reload.
+	if c.APIKey != "" && !strings.HasPrefix(c.APIKey, "Bearer ") {
+		c.APIKey = "Bearer " + c.APIKey
+	}
+	// The subscription inference endpoint only serves requests whose first
+	// system block carries the Claude Code identity, so it has to lead the
+	// system prompt. Any user-configured prefix is kept after it.
+	if !strings.HasPrefix(c.SystemPromptPrefix, anthropicauth.ClaudeCodeIdentity) {
+		c.SystemPromptPrefix = strings.TrimSpace(
+			anthropicauth.ClaudeCodeIdentity + "\n\n" + c.SystemPromptPrefix,
+		)
+	}
 }
 
 type MCPType string
@@ -181,10 +226,50 @@ type MCPConfig struct {
 	URL           string            `json:"url,omitempty" jsonschema:"description=URL for HTTP or SSE MCP servers,format=uri,example=http://localhost:3000/mcp"`
 	Disabled      bool              `json:"disabled,omitempty" jsonschema:"description=Whether this MCP server is disabled,default=false"`
 	DisabledTools []string          `json:"disabled_tools,omitempty" jsonschema:"description=List of tools from this MCP server to disable,example=get-library-doc"`
+	EnabledTools  []string          `json:"enabled_tools,omitempty" jsonschema:"description=Allow list of tools from this MCP server,example=get-library-doc"`
 	Timeout       int               `json:"timeout,omitempty" jsonschema:"description=Timeout in seconds for MCP server connections,default=15,example=30,example=60,example=120"`
 
-	// TODO: maybe make it possible to get the value from the env
+	// Headers are HTTP headers for HTTP/SSE MCP servers. Values run
+	// through shell expansion at MCP startup, so $VAR and $(cmd)
+	// work. A header whose value resolves to the empty string (unset
+	// bare $VAR under lenient nounset, $(echo), or literal "") is
+	// omitted from the outgoing request rather than sent as
+	// "Header:".
 	Headers map[string]string `json:"headers,omitempty" jsonschema:"description=HTTP headers for HTTP/SSE MCP servers"`
+
+	// OAuth enables the MCP OAuth 2.1 authorization flow for HTTP
+	// transport servers. When true, the client uses dynamic client
+	// registration and opens a browser for the user to authorize.
+	// Tokens are persisted automatically. Only supported for type=http.
+	OAuth bool `json:"oauth,omitempty" jsonschema:"description=Enable OAuth 2.1 authorization flow for this MCP server (HTTP transport only),default=false"`
+
+	// OAuthClientID is an optional pre-registered OAuth client ID. Set
+	// it for servers that do not support dynamic client registration
+	// (e.g. GitHub, Slack) and instead issue client credentials when you
+	// register an OAuth app. Values run through shell expansion, so
+	// $VAR and $(cmd) work.
+	OAuthClientID string `json:"oauth_client_id,omitempty" jsonschema:"description=Pre-registered OAuth client ID for servers without dynamic client registration"`
+
+	// OAuthClientSecret is the optional secret paired with
+	// OAuthClientID for confidential clients. Values run through shell
+	// expansion, so $VAR and $(cmd) work.
+	OAuthClientSecret string `json:"oauth_client_secret,omitempty" jsonschema:"description=Pre-registered OAuth client secret paired with oauth_client_id"`
+
+	// OAuthCallbackPort pins the localhost port used for the OAuth
+	// redirect listener. Set this when the OAuth provider requires an
+	// exact-match callback URL (e.g. GitHub OAuth Apps). When omitted,
+	// Crush picks the first free port from its default range.
+	OAuthCallbackPort int `json:"oauth_callback_port,omitempty" jsonschema:"description=Fixed localhost port for the OAuth callback, required by providers that enforce exact-match redirect URIs"`
+
+	// OAuthToken is the persisted OAuth token for this server. It is
+	// managed internally and stored in the global data config.
+	OAuthToken *oauth.Token `json:"oauth_token,omitempty" jsonschema:"-"`
+}
+
+// isOrphanedToken reports whether this entry is a leftover OAuth token
+// with no real server config.
+func (m MCPConfig) isOrphanedToken() bool {
+	return m.Type == "" && m.Command == "" && m.URL == "" && m.OAuthToken != nil
 }
 
 type LSPConfig struct {
@@ -207,6 +292,7 @@ type TUIOptions struct {
 
 	Completions Completions `json:"completions,omitzero" jsonschema:"description=Completions UI options"`
 	Transparent *bool       `json:"transparent,omitempty" jsonschema:"description=Enable transparent background for the TUI interface,default=false"`
+	Scrollbar   string      `json:"scrollbar,omitempty" jsonschema:"description=Chat scrollbar visibility,enum=default,enum=always,enum=never,default=default"`
 }
 
 // Completions defines options for the completions UI.
@@ -218,6 +304,13 @@ type Completions struct {
 func (c Completions) Limits() (depth, items int) {
 	return ptrValOr(c.MaxDepth, 0), ptrValOr(c.MaxItems, 0)
 }
+
+// Scrollbar visibility options.
+const (
+	ScrollbarDefault = "default" // Auto-hide after 2 seconds
+	ScrollbarAlways  = "always"  // Always show when content exceeds viewport
+	ScrollbarNever   = "never"   // Never show scrollbar
+)
 
 type Permissions struct {
 	AllowedTools []string `json:"allowed_tools,omitempty" jsonschema:"description=List of tools that don't require permission prompts,example=bash,example=view"`
@@ -247,22 +340,27 @@ func (Attribution) JSONSchemaExtend(schema *jsonschema.Schema) {
 }
 
 type Options struct {
-	ContextPaths              []string     `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
-	SkillsPaths               []string     `json:"skills_paths,omitempty" jsonschema:"description=Paths to directories containing Agent Skills (folders with SKILL.md files),example=~/.config/crush/skills,example=./skills"`
-	TUI                       *TUIOptions  `json:"tui,omitempty" jsonschema:"description=Terminal user interface options"`
-	Debug                     bool         `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
-	DebugLSP                  bool         `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
-	DisableAutoSummarize      bool         `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
-	DataDirectory             string       `json:"data_directory,omitempty" jsonschema:"description=Directory for storing application data (relative to working directory),default=.crush,example=.crush"` // Relative to the cwd
+	ContextPaths         []string    `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
+	GlobalContextPaths   []string    `json:"global_context_paths,omitempty" jsonschema:"description=Paths to files containing global context information for the AI,default=~/.config/crush/CRUSH.md,default=~/.config/AGENTS.md"`
+	SkillsPaths          []string    `json:"skills_paths,omitempty" jsonschema:"description=Paths to directories containing Agent Skills (folders with SKILL.md files),example=~/.config/crush/skills,example=./skills"`
+	TUI                  *TUIOptions `json:"tui,omitempty" jsonschema:"description=Terminal user interface options"`
+	Debug                bool        `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
+	DebugLSP             bool        `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
+	DisableAutoSummarize bool        `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
+	// DataDirectory is where Crush keeps per-project state such as
+	// the SQLite database and workspace overrides. Relative paths are
+	// resolved against the working directory; absolute paths are used
+	// verbatim. After defaulting the stored value is always absolute.
+	DataDirectory             string       `json:"data_directory,omitempty" jsonschema:"description=Directory for storing application data. Relative paths are resolved against the working directory; absolute paths are used as-is.,default=.crush,example=.crush"`
 	DisabledTools             []string     `json:"disabled_tools,omitempty" jsonschema:"description=List of built-in tools to disable and hide from the agent,example=bash,example=sourcegraph"`
 	DisableProviderAutoUpdate bool         `json:"disable_provider_auto_update,omitempty" jsonschema:"description=Disable providers auto-update,default=false"`
-	DisableDefaultProviders   bool         `json:"disable_default_providers,omitempty" jsonschema:"description=Ignore all default/embedded providers. When enabled, providers must be fully specified in the config file with base_url, models, and api_key - no merging with defaults occurs,default=false"`
+	DisableDefaultProviders   bool         `json:"disable_default_providers,omitempty" jsonschema:"description=Ignore all default/embedded providers. When enabled\\, providers must be fully specified in the config file with base_url\\, models\\, and api_key - no merging with defaults occurs,default=false"`
 	Attribution               *Attribution `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
 	DisableMetrics            bool         `json:"disable_metrics,omitempty" jsonschema:"description=Disable sending metrics,default=false"`
 	InitializeAs              string       `json:"initialize_as,omitempty" jsonschema:"description=Name of the context file to create/update during project initialization,default=AGENTS.md,example=AGENTS.md,example=CRUSH.md,example=CLAUDE.md,example=docs/LLMs.md"`
 	AutoLSP                   *bool        `json:"auto_lsp,omitempty" jsonschema:"description=Automatically setup LSPs based on root markers,default=true"`
 	Progress                  *bool        `json:"progress,omitempty" jsonschema:"description=Show indeterminate progress updates during long operations,default=true"`
-	DisableNotifications      bool         `json:"disable_notifications,omitempty" jsonschema:"description=Disable desktop notifications,default=false"`
+	Notifications             string       `json:"notifications,omitempty" jsonschema:"description=Notification style to use. Options: auto (default)\\, native\\, osc\\, bell\\, disabled. Auto selects based on environment: native for local sessions\\, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
 }
 
@@ -308,25 +406,172 @@ func (l LSPs) Sorted() []LSP {
 	return sorted
 }
 
-func (l LSPConfig) ResolvedEnv() []string {
-	return resolveEnvs(l.Env)
+// ResolvedEnv returns m.Env with every value expanded through the
+// given resolver. The returned slice is of the form "KEY=value" sorted
+// by key so callers get deterministic output; the receiver's Env map is
+// not mutated. On the first resolution failure it returns nil and an
+// error that identifies the offending key; the inner resolver error is
+// already sanitized by ResolveValue and is wrapped with %w so
+// errors.Is/As continues to work. Callers are expected to surface it
+// (for MCP, via StateError on the status card) rather than silently
+// spawn the server with an empty credential.
+//
+// The resolver choice matters: in server mode pass the shell resolver
+// so $VAR / $(cmd) expand; in client mode pass IdentityResolver so the
+// template is forwarded verbatim and expansion happens on the server.
+func (m MCPConfig) ResolvedEnv(r VariableResolver) ([]string, error) {
+	return resolveEnvs(m.Env, r)
 }
 
-func (m MCPConfig) ResolvedEnv() []string {
-	return resolveEnvs(m.Env)
-}
-
-func (m MCPConfig) ResolvedHeaders() map[string]string {
-	resolver := NewShellVariableResolver(env.New())
-	for e, v := range m.Headers {
-		var err error
-		m.Headers[e], err = resolver.ResolveValue(v)
+// ResolvedArgs returns m.Args with every element expanded through the
+// given resolver. A fresh slice is allocated; m.Args is never mutated.
+// On the first resolution failure it returns nil and an error
+// identifying the offending positional index; the inner resolver error
+// is already sanitized by ResolveValue and is wrapped with %w so
+// errors.Is/As continues to work.
+//
+// See ResolvedEnv for guidance on picking a resolver.
+func (m MCPConfig) ResolvedArgs(r VariableResolver) ([]string, error) {
+	if len(m.Args) == 0 {
+		return nil, nil
+	}
+	out := make([]string, len(m.Args))
+	for i, a := range m.Args {
+		v, err := r.ResolveValue(a)
 		if err != nil {
-			slog.Error("Error resolving header variable", "error", err, "variable", e, "value", v)
+			return nil, fmt.Errorf("arg %d: %w", i, err)
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+// ResolvedURL returns m.URL expanded through the given resolver. The
+// receiver is not mutated. Errors from the resolver are already
+// sanitized by ResolveValue and are wrapped with %w for errors.Is/As.
+//
+// URLs run through the same shell-expansion pipeline as the other
+// fields, so a literal '$' (e.g. OData query strings containing
+// $filter/$select) must be escaped as '\$' or '${DOLLAR:-$}' to avoid
+// being interpreted as a variable reference. Same constraint already
+// applies to command, args, env, and headers.
+//
+// See ResolvedEnv for guidance on picking a resolver.
+func (m MCPConfig) ResolvedURL(r VariableResolver) (string, error) {
+	if m.URL == "" {
+		return "", nil
+	}
+	v, err := r.ResolveValue(m.URL)
+	if err != nil {
+		return "", fmt.Errorf("url: %w", err)
+	}
+	return v, nil
+}
+
+// ResolvedHeaders returns m.Headers with every value expanded through
+// the given resolver. A fresh map is allocated; m.Headers is never
+// mutated. On the first resolution failure it returns nil and an error
+// identifying the offending header name; the inner resolver error is
+// already sanitized by ResolveValue and is wrapped with %w so
+// errors.Is/As continues to work.
+//
+// A header whose value resolves to the empty string (unset bare $VAR
+// under lenient nounset, $(echo), or literal "") is omitted from the
+// returned map — sending "X-Auth:" with an empty value is rejected by
+// some providers and the user's intent in "optional, env-gated
+// header" is clearly "absent when the var isn't set."
+//
+// See ResolvedEnv for guidance on picking a resolver.
+func (m MCPConfig) ResolvedHeaders(r VariableResolver) (map[string]string, error) {
+	if len(m.Headers) == 0 {
+		return map[string]string{}, nil
+	}
+	out := make(map[string]string, len(m.Headers))
+	// Sort keys so failures are reported deterministically when more
+	// than one header would fail.
+	keys := make([]string, 0, len(m.Headers))
+	for k := range m.Headers {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		v, err := r.ResolveValue(m.Headers[k])
+		if err != nil {
+			return nil, fmt.Errorf("header %s: %w", k, err)
+		}
+		if v == "" {
 			continue
 		}
+		out[k] = v
 	}
-	return m.Headers
+	return out, nil
+}
+
+// ResolvedArgs returns l.Args with every element expanded through the
+// given resolver. A fresh slice is allocated; l.Args is never mutated.
+// On the first resolution failure it returns nil and an error
+// identifying the offending positional index; the inner resolver error
+// is already sanitized by ResolveValue and is wrapped with %w so
+// errors.Is/As continues to work.
+//
+// Empty resolved values are kept (a deliberate "empty positional arg"
+// like --flag "" is sometimes valid), matching MCPConfig.ResolvedArgs.
+//
+// The resolver choice matters: in server mode pass the shell resolver
+// so $VAR / $(cmd) expand; in client mode pass IdentityResolver so the
+// template is forwarded verbatim.
+func (l LSPConfig) ResolvedArgs(r VariableResolver) ([]string, error) {
+	if len(l.Args) == 0 {
+		return nil, nil
+	}
+	out := make([]string, len(l.Args))
+	for i, a := range l.Args {
+		v, err := r.ResolveValue(a)
+		if err != nil {
+			return nil, fmt.Errorf("arg %d: %w", i, err)
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+// ResolvedEnv returns l.Env with every value expanded through the
+// given resolver. A fresh map is allocated; l.Env is never mutated.
+// On the first resolution failure it returns nil and an error that
+// identifies the offending key; the inner resolver error is already
+// sanitized by ResolveValue and is wrapped with %w so errors.Is/As
+// continues to work.
+//
+// Empty resolved values are kept ("FOO=" is a legitimate request;
+// opt out via ${VAR:+...}), matching MCPConfig.ResolvedEnv.
+//
+// Shape note: this returns map[string]string rather than the []string
+// shape MCPConfig.ResolvedEnv uses because the consumer
+// (powernap.ClientConfig.Environment in internal/lsp/client.go) takes
+// a map directly — returning a []string here would only force a
+// round-trip back to a map at the call site.
+//
+// See ResolvedArgs for guidance on picking a resolver.
+func (l LSPConfig) ResolvedEnv(r VariableResolver) (map[string]string, error) {
+	if len(l.Env) == 0 {
+		return map[string]string{}, nil
+	}
+	out := make(map[string]string, len(l.Env))
+	// Sort keys so failures are reported deterministically when more
+	// than one value would fail.
+	keys := make([]string, 0, len(l.Env))
+	for k := range l.Env {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		v, err := r.ResolveValue(l.Env[k])
+		if err != nil {
+			return nil, fmt.Errorf("env %q: %w", k, err)
+		}
+		out[k] = v
+	}
+	return out, nil
 }
 
 type Agent struct {
@@ -355,6 +600,7 @@ type Agent struct {
 type Tools struct {
 	Ls   ToolLs   `json:"ls,omitzero"`
 	Grep ToolGrep `json:"grep,omitzero"`
+	Glob ToolGlob `json:"glob,omitzero"`
 }
 
 type ToolLs struct {
@@ -374,6 +620,48 @@ type ToolGrep struct {
 // GetTimeout returns the user-defined timeout or the default.
 func (t ToolGrep) GetTimeout() time.Duration {
 	return ptrValOr(t.Timeout, 5*time.Second)
+}
+
+type ToolGlob struct {
+	Timeout *time.Duration `json:"timeout,omitempty" jsonschema:"description=Timeout for the glob tool call,default=30s,example=10s"`
+}
+
+// GetTimeout returns the user-defined timeout or the default.
+func (t ToolGlob) GetTimeout() time.Duration {
+	return ptrValOr(t.Timeout, 30*time.Second)
+}
+
+// HookConfig defines a user-configured shell command that fires on a hook
+// event (e.g. PreToolUse). This is a pure-data struct: matcher compilation
+// is owned by hooks.Runner so a JSON round-trip, merge, or reload can't
+// silently drop compiled state.
+type HookConfig struct {
+	// Friendly display name shown in the TUI. Falls back to Command when empty.
+	Name string `json:"name,omitempty" jsonschema:"description=Friendly display name shown in the TUI for this hook"`
+	// Regex pattern tested against the tool name. Empty means match all.
+	Matcher string `json:"matcher,omitempty" jsonschema:"description=Regex pattern tested against the tool name. Empty means match all tools."`
+	// Shell command to execute.
+	Command string `json:"command" jsonschema:"required,description=Shell command to execute when the hook fires"`
+	// Timeout in seconds. Default 30.
+	Timeout int `json:"timeout,omitempty" jsonschema:"description=Timeout in seconds for the hook command,default=30"`
+}
+
+// DisplayName returns the hook name for display purposes. It returns Name
+// when set, otherwise falls back to Command.
+func (h *HookConfig) DisplayName() string {
+	if h.Name != "" {
+		return h.Name
+	}
+	return h.Command
+}
+
+// TimeoutDuration returns the hook timeout as a time.Duration, defaulting
+// to 30s.
+func (h *HookConfig) TimeoutDuration() time.Duration {
+	if h.Timeout <= 0 {
+		return 30 * time.Second
+	}
+	return time.Duration(h.Timeout) * time.Second
 }
 
 // Config holds the configuration for crush.
@@ -399,7 +687,51 @@ type Config struct {
 
 	Tools Tools `json:"tools,omitzero" jsonschema:"description=Tool configurations"`
 
+	Hooks map[string][]HookConfig `json:"hooks,omitempty" jsonschema:"description=User-defined shell commands that fire on hook events (e.g. PreToolUse)"`
+
+	// Env is a map of environment variables set on startup.
+	Env map[string]string `json:"env,omitempty" jsonschema:"description=Environment variables to set on startup"`
+
 	Agents map[string]Agent `json:"-"`
+}
+
+// cloneForWrite returns a copy of c that the store's typed field mutators
+// may modify without racing readers of the currently published Config.
+//
+// Reads of a published Config take no lock beyond the pointer load, so a
+// mutator must never write through the live pointer. Instead it clones,
+// mutates the clone, and atomically swaps it in. The clone gives fresh
+// copies of every field a typed mutator touches in place — Models,
+// RecentModels, MCP, and Options (with its nested TUI pointer). Providers
+// is a *csync.Map (internally synchronized) and is shared by reference;
+// the remaining fields are immutable after load from the mutators'
+// standpoint and are likewise shared.
+func (c *Config) cloneForWrite() *Config {
+	nc := *c
+	nc.Models = maps.Clone(c.Models)
+	nc.RecentModels = maps.Clone(c.RecentModels)
+	nc.MCP = maps.Clone(c.MCP)
+	if c.Options != nil {
+		opts := *c.Options
+		if c.Options.TUI != nil {
+			tui := *c.Options.TUI
+			opts.TUI = &tui
+		}
+		nc.Options = &opts
+	}
+	return &nc
+}
+
+// ensureTUI returns c.Options.TUI, allocating Options and TUI as needed so
+// callers can assign TUI fields without nil checks.
+func (c *Config) ensureTUI() *TUIOptions {
+	if c.Options == nil {
+		c.Options = &Options{}
+	}
+	if c.Options.TUI == nil {
+		c.Options.TUI = &TUIOptions{}
+	}
+	return c.Options.TUI
 }
 
 func (c *Config) EnabledProviders() []ProviderConfig {
@@ -479,11 +811,17 @@ func allToolNames() []string {
 		"lsp_diagnostics",
 		"lsp_references",
 		"lsp_restart",
+		"lsp_symbols",
+		"lsp_definition",
+		"lsp_call_hierarchy",
+		"lsp_rename",
+		"lsp_replace_symbol",
 		"fetch",
 		"agentic_fetch",
 		"glob",
 		"grep",
 		"ls",
+		"question",
 		"sourcegraph",
 		"todos",
 		"view",
@@ -502,7 +840,7 @@ func resolveAllowedTools(allTools []string, disabledTools []string) []string {
 }
 
 func resolveReadOnlyTools(tools []string) []string {
-	readOnlyTools := []string{"glob", "grep", "ls", "sourcegraph", "view"}
+	readOnlyTools := []string{"glob", "grep", "ls", "lsp_call_hierarchy", "lsp_definition", "lsp_symbols", "sourcegraph", "view"}
 	// filter to only include tools that are in allowedtools (include mode)
 	return filterSlice(tools, readOnlyTools, true)
 }
@@ -557,6 +895,13 @@ func (c *ProviderConfig) TestConnection(resolver VariableResolver) error {
 	switch providerID {
 	case catwalk.InferenceProviderMiniMax, catwalk.InferenceProviderMiniMaxChina:
 		// NOTE: MiniMax has no good endpoint we can use to validate the API key.
+		return nil
+	case catwalk.InferenceProviderAlibabaSingapore:
+		// NOTE: Alibaba has no good endpoint we can use to validate the API key.
+		// Let's at least check the pattern.
+		if !strings.HasPrefix(apiKey, "sk-") {
+			return fmt.Errorf("invalid API key format for provider %s", c.ID)
+		}
 		return nil
 	}
 
@@ -642,22 +987,29 @@ func (c *ProviderConfig) TestConnection(resolver VariableResolver) error {
 	return nil
 }
 
-func resolveEnvs(envs map[string]string) []string {
-	resolver := NewShellVariableResolver(env.New())
-	for e, v := range envs {
-		var err error
-		envs[e], err = resolver.ResolveValue(v)
-		if err != nil {
-			slog.Error("Error resolving environment variable", "error", err, "variable", e, "value", v)
-			continue
-		}
+// resolveEnvs expands every value in envs through the given resolver
+// and returns a fresh "KEY=value" slice sorted by key. The input map is
+// not mutated. On the first resolution failure it returns nil and an
+// error identifying the offending variable; the inner resolver error is
+// already sanitized by ResolveValue and is wrapped with %w.
+func resolveEnvs(envs map[string]string, r VariableResolver) ([]string, error) {
+	if len(envs) == 0 {
+		return nil, nil
 	}
-
+	keys := make([]string, 0, len(envs))
+	for k := range envs {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
 	res := make([]string, 0, len(envs))
-	for k, v := range envs {
+	for _, k := range keys {
+		v, err := r.ResolveValue(envs[k])
+		if err != nil {
+			return nil, fmt.Errorf("env %s: %w", k, err)
+		}
 		res = append(res, fmt.Sprintf("%s=%s", k, v))
 	}
-	return res
+	return res, nil
 }
 
 func ptrValOr[T any](t *T, el T) T {

@@ -64,8 +64,13 @@ type SessionFile struct {
 // the diff statistics (additions and deletions) for each file in the session.
 // It returns a tea.Cmd that, when executed, fetches the session data and
 // returns a sessionFilesLoadedMsg containing the processed session files.
+//
+// The returned batch also reports the new current-session selection to
+// the workspace so the server can update its per-client presence map.
+// That report is fire-and-forget: errors are logged at debug and the
+// UI never blocks on the call.
 func (m *UI) loadSession(sessionID string) tea.Cmd {
-	return func() tea.Msg {
+	load := func() tea.Msg {
 		session, err := m.com.Workspace.GetSession(context.Background(), sessionID)
 		if err != nil {
 			return util.ReportError(err)
@@ -86,6 +91,21 @@ func (m *UI) loadSession(sessionID string) tea.Cmd {
 			files:     sessionFiles,
 			readFiles: readFiles,
 		}
+	}
+	return tea.Batch(load, m.reportCurrentSession(sessionID))
+}
+
+// reportCurrentSession returns a fire-and-forget tea.Cmd that
+// informs the workspace which session this client is currently
+// viewing. Errors are logged at debug only; the call is a hint
+// for server-side presence tracking, not correctness-critical
+// state.
+func (m *UI) reportCurrentSession(sessionID string) tea.Cmd {
+	return func() tea.Msg {
+		if err := m.com.Workspace.SetCurrentSession(context.Background(), sessionID); err != nil {
+			slog.Debug("Failed to report current session", "session_id", sessionID, "error", err)
+		}
+		return nil
 	}
 }
 
@@ -163,11 +183,11 @@ func (m *UI) handleFileEvent(file history.File) tea.Cmd {
 func (m *UI) filesInfo(cwd string, width, maxItems int, isSection bool) string {
 	t := m.com.Styles
 
-	title := t.Subtle.Render("Modified Files")
+	title := t.Files.SectionTitle.Render("Modified Files")
 	if isSection {
 		title = common.Section(t, "Modified Files", width)
 	}
-	list := t.Subtle.Render("None")
+	list := t.Files.EmptyMessage.Render("None")
 	var filesWithChanges []SessionFile
 	for _, f := range m.sessionFiles {
 		if f.Additions == 0 && f.Deletions == 0 {
@@ -213,7 +233,12 @@ func fileList(t *styles.Styles, cwd string, filesWithChanges []SessionFile, widt
 			filePath = rel
 		}
 		filePath = fsext.DirTrim(filePath, 2)
-		filePath = ansi.Truncate(filePath, width-(lipgloss.Width(extraContent)-2), "…")
+		suffix := ""
+		if extraContent != "" {
+			suffix = " " + extraContent
+		}
+		maxPathWidth := max(width-lipgloss.Width(suffix), 0)
+		filePath = ansi.Truncate(filePath, maxPathWidth, "…")
 
 		line := t.Files.Path.Render(filePath)
 		if extraContent != "" {
@@ -226,7 +251,7 @@ func fileList(t *styles.Styles, cwd string, filesWithChanges []SessionFile, widt
 
 	if len(filesWithChanges) > maxItems {
 		remaining := len(filesWithChanges) - maxItems
-		renderedFiles = append(renderedFiles, t.Subtle.Render(fmt.Sprintf("…and %d more", remaining)))
+		renderedFiles = append(renderedFiles, t.Files.TruncationHint.Render(fmt.Sprintf("…and %d more", remaining)))
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, renderedFiles...)
