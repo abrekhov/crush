@@ -177,8 +177,10 @@ OAuth details (implementation in `internal/oauth/anthropic/pkce.go`):
 - **Scopes**: `org:create_api_key user:profile user:inference`
 - **PKCE**: S256 (no client secret needed)
 
-Tokens are stored in `~/.config/crush/config.json` under `providers.anthropic.oauth`.
-The access token auto-refreshes via `providers.anthropic.oauth.refresh_token`.
+Tokens are stored in `~/.local/share/crush/crush.json` (the data directory, *not*
+`~/.config/crush/`) under `providers.anthropic.oauth`. Run `crush dirs` to confirm
+the paths on a given machine. The access token auto-refreshes via
+`providers.anthropic.oauth.refresh_token`.
 
 Paste the whole `code` value from the redirect URL — it looks like `<code>#<state>`,
 and `ExchangeCode` splits the fragment off itself.
@@ -201,6 +203,11 @@ and `ExchangeCode` splits the fragment off itself.
 already-prepared provider. It runs on login, on config load, and after a 401
 refresh, so the three properties survive a token rotation.
 
+All three are applied **in memory at load time and never written to disk**. On disk
+you will see the raw token with no `Bearer ` prefix, no `extra_headers`, and no
+system prompt prefix — that is correct, not a broken login. Judge the login by
+whether `providers.anthropic.oauth.refresh_token` exists, not by those three fields.
+
 Note: upstream **removed** Claude Code subscription support (it deletes the
 `providers.anthropic` config to force onboarding). This fork restores it, so expect
 that hunk to conflict on every upstream merge.
@@ -222,4 +229,6 @@ crush login hyper   # or just: crush login
 - CGO is disabled (`CGO_ENABLED=0`) — pure Go binary, runs everywhere
 - `GOEXPERIMENT=greenteagc` is set for the GC experiment
 - Log messages must start with a capital letter (enforced by `scripts/check_log_capitalization.sh`)
-- Config lives in `~/.config/crush/` (XDG), workspace data in `.crush/` inside the project dir
+- Config lives in `~/.config/crush/` (XDG), credentials and provider cache in
+  `~/.local/share/crush/`, workspace data in `.crush/` inside the project dir.
+  `crush dirs` prints all of them.
