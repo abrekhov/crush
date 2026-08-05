@@ -142,11 +142,21 @@ Override with `--host unix:///custom/path.sock` on both `crush server` and `crus
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| `build.yml` | push/PR to main | `go build`, `go test` on Linux, macOS, Windows |
-| `lint.yml` | push/PR to main | golangci-lint |
-| `snapshot.yml` | push to main | goreleaser snapshot build (no release) |
+| `build.yml` | push/PR to `abrekhov/main` | `go build`, `go test` on Linux, macOS, Windows |
+| `lint.yml` | push/PR to `abrekhov/main` | golangci-lint |
+| `snapshot.yml` | push to `abrekhov/main` | goreleaser snapshot build (no release) |
 | `release.yml` | push tag `v*.*.*` | goreleaser release → GitHub Releases |
 | `security.yml` | push/PR/nightly | CodeQL, Grype, govulncheck |
+| `schema-update.yml` | push to `abrekhov/main` touching config | regenerates `schema.json`, commits back |
+
+Workflows are pinned to `abrekhov/main` so the upstream mirror never triggers builds.
+
+Three upstream workflows are **disabled at the repository level** (not in the files, so
+upstream merges stay conflict-free): `nightly`, `CLA Assistant`, and `labeler`. They depend
+on Charm organization secrets this fork does not have. Re-enable with `gh workflow enable <name>`.
+
+Lint runs `gofumpt`, which sorts the module's own imports differently from upstream's because
+of the fork rename. Run `gofumpt -w .` before pushing or lint will fail.
 
 ## Authentication (providers)
 
