@@ -52,6 +52,29 @@ type SessionItem struct {
 	updateTitleInput textinput.Model
 	focused          bool
 	hideInfo         bool
+	running          bool
+}
+
+// runningMarker flags a session whose agent is still generating.
+const runningMarker = "●"
+
+// SetRunning marks the session as generating. Sessions keep running when
+// the user switches away, so the list is the only place a background run
+// is visible.
+func (s *SessionItem) SetRunning(v bool) {
+	if s.running == v {
+		return
+	}
+	s.cache = nil
+	s.running = v
+	if s.Versioned != nil {
+		s.Bump()
+	}
+}
+
+// Running reports whether the session's agent is still generating.
+func (s *SessionItem) Running() bool {
+	return s.running
 }
 
 // Finished implements list.Item. Session items are render-stable
@@ -134,6 +157,11 @@ func (s *SessionItem) Render(width int) string {
 		ItemFocused:     s.t.Dialog.SelectedItem,
 		InfoTextBlurred: s.t.Dialog.Sessions.InfoBlurred,
 		InfoTextFocused: s.t.Dialog.Sessions.InfoFocused,
+		MarkerBlurred:   s.t.Dialog.Sessions.RunningBlurred,
+		MarkerFocused:   s.t.Dialog.Sessions.RunningFocused,
+	}
+	if s.running {
+		styles.Marker = runningMarker
 	}
 
 	switch s.sessionsMode {
@@ -160,6 +188,12 @@ type ListItemStyles struct {
 	ItemFocused     lipgloss.Style
 	InfoTextBlurred lipgloss.Style
 	InfoTextFocused lipgloss.Style
+
+	// Marker is an optional glyph rendered just left of the info column.
+	// Empty for item types that don't use one.
+	Marker        string
+	MarkerBlurred lipgloss.Style
+	MarkerFocused lipgloss.Style
 }
 
 func renderItem(t ListItemStyles, title string, info string, focused bool, width int, cache map[int]string, m *fuzzy.Match) string {
@@ -199,6 +233,18 @@ func renderItem(t ListItemStyles, title string, info string, focused bool, width
 		}
 
 		infoWidth = lipgloss.Width(infoText)
+	}
+
+	if t.Marker != "" {
+		markerStyle := t.MarkerBlurred
+		if focused {
+			markerStyle = t.MarkerFocused
+		}
+		marker := markerStyle.Render(" " + t.Marker)
+		// The marker sits left of the info column, so both share the
+		// budget the title has to give way to.
+		infoText = marker + infoText
+		infoWidth += lipgloss.Width(marker)
 	}
 
 	title = ansi.Truncate(title, max(0, lineWidth-infoWidth), "…")
@@ -252,11 +298,15 @@ func (s *SessionItem) SetFocused(focused bool) {
 }
 
 // sessionItems takes a slice of [session.Session]s and convert them to a slice
-// of [ListItem]s.
-func sessionItems(t *styles.Styles, mode sessionsMode, sessions ...session.Session) []list.FilterableItem {
+// of [ListItem]s. running reports whether a session's agent is still
+// generating; it may be nil when that state is unavailable.
+func sessionItems(t *styles.Styles, mode sessionsMode, running func(string) bool, sessions ...session.Session) []list.FilterableItem {
 	items := make([]list.FilterableItem, len(sessions))
 	for i, s := range sessions {
 		item := &SessionItem{Versioned: list.NewVersioned(), Session: s, t: t, sessionsMode: mode}
+		if running != nil {
+			item.running = running(s.ID)
+		}
 		if mode == sessionsModeUpdating {
 			item.updateTitleInput = textinput.New()
 			item.updateTitleInput.SetVirtualCursor(false)

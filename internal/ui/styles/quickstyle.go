@@ -1005,6 +1005,8 @@ func quickStyle(o quickStyleOpts) Styles {
 	s.Dialog.Sessions.RenamingPlaceholder = base.Foreground(o.fgMoreSubtle)
 	s.Dialog.Sessions.InfoBlurred = lipgloss.NewStyle().Foreground(o.fgMostSubtle)
 	s.Dialog.Sessions.InfoFocused = lipgloss.NewStyle().Foreground(o.fgBase)
+	s.Dialog.Sessions.RunningBlurred = lipgloss.NewStyle().Foreground(o.accent)
+	s.Dialog.Sessions.RunningFocused = lipgloss.NewStyle().Foreground(o.accent)
 
 	s.Status.Help = lipgloss.NewStyle().Padding(0, 1)
 	s.Status.SuccessIndicator = base.Foreground(o.bgLessVisible).Background(o.success).Padding(0, 1).Bold(true).SetString("OKAY!")

@@ -535,6 +535,11 @@ type Styles struct {
 
 			InfoBlurred lipgloss.Style // Timestamp text on unfocused session items
 			InfoFocused lipgloss.Style // Timestamp text on the focused session item
+
+			// Marker on sessions whose agent is still generating, so runs
+			// left going in the background stay visible in the list.
+			RunningBlurred lipgloss.Style
+			RunningFocused lipgloss.Style
 		}
 	}
 

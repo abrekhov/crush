@@ -153,3 +153,58 @@ func TestRun_ConcurrentInProcessDispatchStartsOneRun(t *testing.T) {
 	close(model.release)
 	wg.Wait()
 }
+
+// TestRun_DifferentSessionsStreamConcurrently is the counterpart to the test
+// above: serialization is per session, so two *different* sessions must be
+// able to generate at the same time. This is what lets a user start a run,
+// switch to another session, and start a second run while the first keeps
+// going in the background.
+//
+// The guard is deliberately a positive assertion (both streams in flight at
+// once) so that reintroducing a workspace-wide dispatch lock fails here
+// instead of silently degrading concurrent sessions into a queue.
+func TestRun_DifferentSessionsStreamConcurrently(t *testing.T) {
+	t.Parallel()
+	env := testEnv(t)
+	model := &concurrencyProbeModel{
+		entered: make(chan struct{}, 2),
+		release: make(chan struct{}),
+	}
+	sa := testSessionAgent(env, model, fastModel{}, "system").(*sessionAgent)
+
+	first, err := env.sessions.Create(t.Context(), "first")
+	require.NoError(t, err)
+	second, err := env.sessions.Create(t.Context(), "second")
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	for _, id := range []string{first.ID, second.ID} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = sa.Run(t.Context(), SessionAgentCall{
+				SessionID: id,
+				Prompt:    "prompt",
+			})
+		}()
+	}
+
+	// Both runs must reach their stream; neither may wait on the other.
+	deadline := time.After(10 * time.Second)
+	for model.inFlight.Load() < 2 {
+		select {
+		case <-deadline:
+			close(model.release)
+			wg.Wait()
+			t.Fatalf("only %d of 2 sessions started streaming; sessions are being serialized",
+				model.inFlight.Load())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	require.Equal(t, int32(2), model.maxSeen.Load(),
+		"two sessions must be able to generate at the same time")
+
+	close(model.release)
+	wg.Wait()
+}

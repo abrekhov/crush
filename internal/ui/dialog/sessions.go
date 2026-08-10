@@ -78,7 +78,7 @@ func NewSessions(com *common.Common, selectedSessionID string) (*Session, error)
 	help.Styles = com.Styles.DialogHelpStyles()
 
 	s.help = help
-	s.list = list.NewFilterableList(sessionItems(com.Styles, sessionsModeNormal, sessions...)...)
+	s.list = list.NewFilterableList(s.items(sessionsModeNormal)...)
 	s.list.Focus()
 	s.list.SetSelected(s.selectedSessionInx)
 
@@ -147,23 +147,23 @@ func (s *Session) HandleMsg(msg tea.Msg) Action {
 			switch {
 			case key.Matches(msg, s.keyMap.ConfirmDelete):
 				action := s.confirmDeleteSession()
-				s.list.SetItems(sessionItems(s.com.Styles, sessionsModeNormal, s.sessions...)...)
+				s.list.SetItems(s.items(sessionsModeNormal)...)
 				s.list.SelectFirst()
 				s.list.ScrollToSelected()
 				return action
 			case key.Matches(msg, s.keyMap.CancelDelete):
 				s.sessionsMode = sessionsModeNormal
-				s.list.SetItems(sessionItems(s.com.Styles, sessionsModeNormal, s.sessions...)...)
+				s.list.SetItems(s.items(sessionsModeNormal)...)
 			}
 		case sessionsModeUpdating:
 			switch {
 			case key.Matches(msg, s.keyMap.ConfirmRename):
 				action := s.confirmRenameSession()
-				s.list.SetItems(sessionItems(s.com.Styles, sessionsModeNormal, s.sessions...)...)
+				s.list.SetItems(s.items(sessionsModeNormal)...)
 				return action
 			case key.Matches(msg, s.keyMap.CancelRename):
 				s.sessionsMode = sessionsModeNormal
-				s.list.SetItems(sessionItems(s.com.Styles, sessionsModeNormal, s.sessions...)...)
+				s.list.SetItems(s.items(sessionsModeNormal)...)
 			default:
 				item := s.list.SelectedItem()
 				if item == nil {
@@ -179,13 +179,13 @@ func (s *Session) HandleMsg(msg tea.Msg) Action {
 				return ActionClose{}
 			case key.Matches(msg, s.keyMap.Rename):
 				s.sessionsMode = sessionsModeUpdating
-				s.list.SetItems(sessionItems(s.com.Styles, sessionsModeUpdating, s.sessions...)...)
+				s.list.SetItems(s.items(sessionsModeUpdating)...)
 			case key.Matches(msg, s.keyMap.Delete):
 				if s.isCurrentSessionBusy() {
 					return ActionCmd{util.ReportWarn("Agent is busy, please wait...")}
 				}
 				s.sessionsMode = sessionsModeDeleting
-				s.list.SetItems(sessionItems(s.com.Styles, sessionsModeDeleting, s.sessions...)...)
+				s.list.SetItems(s.items(sessionsModeDeleting)...)
 			case key.Matches(msg, s.keyMap.Previous):
 				s.list.Focus()
 				if s.list.IsSelectedFirst() {
@@ -403,6 +403,22 @@ func (s *Session) isCurrentSessionBusy() bool {
 	}
 
 	return s.com.Workspace.AgentIsSessionBusy(sessionItem.ID())
+}
+
+// sessionIsRunning reports whether a session's agent is still generating.
+// Sessions keep running after the user switches away, so this is what
+// surfaces a background run in the list.
+func (s *Session) sessionIsRunning(id string) bool {
+	if !s.com.Workspace.AgentIsReady() {
+		return false
+	}
+	return s.com.Workspace.AgentIsSessionBusy(id)
+}
+
+// items rebuilds the list items for mode, re-probing which sessions are
+// still generating so the marker reflects the current state.
+func (s *Session) items(mode sessionsMode) []list.FilterableItem {
+	return sessionItems(s.com.Styles, mode, s.sessionIsRunning, s.sessions...)
 }
 
 // ShortHelp implements [help.KeyMap].
