@@ -199,6 +199,17 @@ and `ExchangeCode` splits the fragment off itself.
    front of `SystemPromptPrefix`, which the agent prepends as a leading system
    message; a user-configured prefix is preserved after it.
 
+   It must be a **block of its own**. Concatenating it with more text into a
+   single block is refused even though the text still leads. Verified live:
+   `[{identity}, {prompt}]` returns 200 while `[{identity + "
+
+" + prompt}]`
+   returns 429.
+
+   The refusal is `429 rate_limit_error`, **not** 401, so getting this wrong
+   looks like throttling rather than misconfiguration. Item 2 (`anthropic-beta`)
+   was observed to be optional in testing; items 1 and 3 are not.
+
 `SetupAnthropicOAuth` is idempotent — config reloads re-run it over an
 already-prepared provider. It runs on login, on config load, and after a 401
 refresh, so the three properties survive a token rotation.
